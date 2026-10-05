@@ -63,6 +63,68 @@ $driver = [regex]::Replace(
     TargetModes.push_back(CreateIddCxTargetMode(2048, 1536, 30));
 '@
 )
+
+# Add a lightweight frame probe at the IddCx swapchain handoff. This deliberately
+# avoids CPU readback/encoding; it only verifies that PadDisplay is receiving the
+# compositor's D3D11 textures at the expected mode and cadence.
+$driver = $driver.Replace(
+    '#include "Driver.h"',
+@'
+#include "Driver.h"
+#include <cstdio>
+'@
+)
+
+$driver = $driver.Replace(
+    '    // Acquire and release buffers in a loop',
+@'
+    // PadDisplay frame probe. Keep this inside the swapchain thread so we verify
+    // the exact surface that will later be handed to NVENC.
+    UINT64 PadDisplayFrameNumber = 0;
+
+    // Acquire and release buffers in a loop
+'@
+)
+
+$driver = [regex]::Replace(
+    $driver,
+    '(?s)            // ==============================\r?\n            // TODO: Process the frame here.*?            // ==============================',
+@'
+            ++PadDisplayFrameNumber;
+
+            ComPtr<ID3D11Texture2D> PadDisplayTexture;
+            HRESULT TextureHr = AcquiredBuffer.As(&PadDisplayTexture);
+            if (SUCCEEDED(TextureHr))
+            {
+                D3D11_TEXTURE2D_DESC TextureDesc = {};
+                PadDisplayTexture->GetDesc(&TextureDesc);
+
+                // Emit the first frame and then roughly every two seconds at 60 Hz.
+                if (PadDisplayFrameNumber == 1 || (PadDisplayFrameNumber % 120) == 0)
+                {
+                    char Message[256] = {};
+                    sprintf_s(
+                        Message,
+                        "PadDisplay IDD frame %llu: %ux%u format=%u bind=0x%X misc=0x%X\n",
+                        static_cast<unsigned long long>(PadDisplayFrameNumber),
+                        TextureDesc.Width,
+                        TextureDesc.Height,
+                        static_cast<unsigned int>(TextureDesc.Format),
+                        TextureDesc.BindFlags,
+                        TextureDesc.MiscFlags);
+                    OutputDebugStringA(Message);
+                }
+
+                // Next milestone: copy/encode PadDisplayTexture on-GPU and send the
+                // resulting H.264 stream to the existing PadDisplay TCP receiver.
+            }
+            else if (PadDisplayFrameNumber == 1)
+            {
+                OutputDebugStringA("PadDisplay IDD: acquired swapchain surface is not ID3D11Texture2D\n");
+            }
+'@
+)
+
 Set-Content (Join-Path $driverOut "Driver.cpp") $driver -Encoding UTF8
 
 $driverHeader = Get-Content (Join-Path $driverOut "Driver.h") -Raw
