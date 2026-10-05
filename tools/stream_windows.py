@@ -22,7 +22,12 @@ def main():
     p.add_argument("--size", default="1280x720")
     p.add_argument("--bitrate", default="6M")
     p.add_argument("--chunk", type=int, default=4096)
-    p.add_argument("--encoder", choices=("nvenc", "x264"), default="nvenc",\n                   help="H.264 encoder (default: nvenc)")\n    p.add_argument("--capture", choices=("ddagrab", "gdigrab"), default="ddagrab",\n                   help="Windows capture backend (default: ddagrab)")\n    p.add_argument("--display", type=int, default=0,\n                   help="ddagrab output index (default: 0)")
+    p.add_argument("--encoder", choices=("nvenc", "x264"), default="nvenc",
+                   help="H.264 encoder (default: nvenc)")
+    p.add_argument("--capture", choices=("ddagrab", "gdigrab"), default="ddagrab",
+                   help="Windows capture backend (default: ddagrab)")
+    p.add_argument("--display", type=int, default=0,
+                   help="ddagrab output index (default: 0)")
     args = p.parse_args()
 
     if shutil.which(args.ffmpeg) is None and args.ffmpeg == "ffmpeg":
