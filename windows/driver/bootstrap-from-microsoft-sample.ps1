@@ -20,7 +20,7 @@ New-Item -ItemType Directory -Force $driverOut, $appOut | Out-Null
 
 Copy-Item (Join-Path $DriverSource "Driver.cpp") (Join-Path $driverOut "Driver.cpp") -Force
 Copy-Item (Join-Path $DriverSource "Driver.h") (Join-Path $driverOut "Driver.h") -Force
-Copy-Item (Join-Path $DriverSource "Trace.h") (Join-Path $driverOut "Trace.h") -Force
+Copy-Item (Join-Path $DriverSource "Trace.h") (Join-Path $driverOut "trace.h") -Force
 Copy-Item (Join-Path $DriverSource "IddSampleDriver.vcxproj.filters") (Join-Path $driverOut "PadDisplayDriver.vcxproj.filters") -Force
 Copy-Item (Join-Path $DriverSource "IddSampleDriver.vcxproj") (Join-Path $driverOut "PadDisplayDriver.vcxproj") -Force
 Copy-Item (Join-Path $DriverSource "IddSampleDriver.inf") (Join-Path $driverOut "PadDisplayDriver.inf") -Force
@@ -65,6 +65,10 @@ $driver = [regex]::Replace(
 )
 Set-Content (Join-Path $driverOut "Driver.cpp") $driver -Encoding UTF8
 
+$driverHeader = Get-Content (Join-Path $driverOut "Driver.h") -Raw
+$driverHeader = $driverHeader.Replace('#include "Trace.h"', '#include "trace.h"')
+Set-Content (Join-Path $driverOut "Driver.h") $driverHeader -Encoding UTF8
+
 $inf = Get-Content (Join-Path $driverOut "PadDisplayDriver.inf") -Raw
 $inf = $inf.Replace("IddSampleDriver.cat", "PadDisplayDriver.cat")
 $inf = $inf.Replace("Root\IddSampleDriver", "Root\PadDisplay")
@@ -82,10 +86,12 @@ Set-Content (Join-Path $driverOut "PadDisplayDriver.inf") $inf -Encoding UTF8
 $proj = Get-Content (Join-Path $driverOut "PadDisplayDriver.vcxproj") -Raw
 $proj = $proj.Replace("<RootNamespace>IddSampleDriver</RootNamespace>", "<RootNamespace>PadDisplayDriver</RootNamespace>")
 $proj = $proj.Replace('<Inf Include="IddSampleDriver.inf" />', '<Inf Include="PadDisplayDriver.inf" />')
+$proj = $proj.Replace('<ClInclude Include="Trace.h" />', '<ClInclude Include="trace.h" />')
 Set-Content (Join-Path $driverOut "PadDisplayDriver.vcxproj") $proj -Encoding UTF8
 
 $filters = Get-Content (Join-Path $driverOut "PadDisplayDriver.vcxproj.filters") -Raw
 $filters = $filters.Replace('IddSampleDriver.inf', 'PadDisplayDriver.inf')
+$filters = $filters.Replace('Trace.h', 'trace.h')
 Set-Content (Join-Path $driverOut "PadDisplayDriver.vcxproj.filters") $filters -Encoding UTF8
 
 $app = Get-Content (Join-Path $appOut "main.cpp") -Raw
