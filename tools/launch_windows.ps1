@@ -39,6 +39,28 @@ public static class PadDisplayMode {
 }
 "@
 
+function Test-TcpPort($HostName, $Port, $TimeoutMs=400) {
+  $client = New-Object System.Net.Sockets.TcpClient
+  try {
+    $iar = $client.BeginConnect($HostName, $Port, $null, $null)
+    if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return $false }
+    $client.EndConnect($iar)
+    return $true
+  } catch { return $false } finally { $client.Close() }
+}
+
+function Start-UsbProxy {
+  $iproxy = (Get-Command iproxy.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+  if (-not $iproxy) { $iproxy = (Get-Command iproxy -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
+  if (-not $iproxy) { return $null }
+  Get-Process iproxy -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  $p = Start-Process -FilePath $iproxy -ArgumentList "4823:4822" -WindowStyle Hidden -PassThru
+  Start-Sleep -Milliseconds 700
+  if (Test-TcpPort "127.0.0.1" 4823 500) { return $p }
+  if ($p -and -not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
+  return $null
+}
+
 function Read-Choice($Prompt, $Default, $Min, $Max) {
   while ($true) {
     $v = Read-Host "$Prompt [$Default]"
@@ -155,11 +177,29 @@ if($null -eq $foundAdapter){throw "Could not find $size through DXGI ddagrab."}
 
 Write-Host "Streaming $size @ $fps, $bitrate, DXGI adapter $foundAdapter output $foundOutput"
 Write-Host "Touch: native Windows multi-touch"
+$usbProxy = $null
 while ($true) {
-  & python $streamer $ipadIp --ffmpeg $ffmpeg --capture ddagrab --adapter $foundAdapter --display $foundOutput --fps $fps --bitrate $bitrate --size $size --touch-left $screen.Bounds.X --touch-top $screen.Bounds.Y --touch-width $mode.W --touch-height $mode.H
+  if (-not $usbProxy -or $usbProxy.HasExited -or -not (Test-TcpPort "127.0.0.1" 4823 250)) {
+    $usbProxy = Start-UsbProxy
+  }
+
+  if ($usbProxy -and -not $usbProxy.HasExited -and (Test-TcpPort "127.0.0.1" 4823 250)) {
+    $targetHost = "127.0.0.1"
+    $targetPort = 4823
+    Write-Host "Transport: USB (usbmux / iproxy)" -ForegroundColor Green
+  } else {
+    $targetHost = $ipadIp
+    $targetPort = 4822
+    Write-Host "Transport: Wi-Fi ($ipadIp)" -ForegroundColor Cyan
+  }
+
+  & python $streamer $targetHost --port $targetPort --ffmpeg $ffmpeg --capture ddagrab --adapter $foundAdapter --display $foundOutput --fps $fps --bitrate $bitrate --size $size --touch-left $screen.Bounds.X --touch-top $screen.Bounds.Y --touch-width $mode.W --touch-height $mode.H
   $code = $LASTEXITCODE
-  if ($code -eq 130) { exit 0 }
+  if ($code -eq 130) {
+    if ($usbProxy -and -not $usbProxy.HasExited) { $usbProxy | Stop-Process -Force -ErrorAction SilentlyContinue }
+    exit 0
+  }
   Write-Host ""
-  Write-Host "PadDisplay disconnected. Reconnecting in 1 second... (Ctrl+C to stop)" -ForegroundColor Yellow
+  Write-Host "PadDisplay disconnected. Re-evaluating USB/Wi-Fi transport in 1 second..." -ForegroundColor Yellow
   Start-Sleep 1
 }
