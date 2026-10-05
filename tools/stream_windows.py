@@ -530,7 +530,13 @@ def main():
     if args.encoder == "nvenc":
         print("NVENC low-latency: rc-lookahead=0, VBV=%s (~1 frame), no frame dropping" % vbv_bufsize)
 
-    with socket.create_connection((args.host, args.port), timeout=5) as sock:
+    try:
+        sock = socket.create_connection((args.host, args.port), timeout=5)
+    except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError, TimeoutError, OSError) as exc:
+        print("Connect failed: %s" % exc)
+        return
+
+    with sock:
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
