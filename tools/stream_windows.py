@@ -35,8 +35,7 @@ def main():
     if args.capture == "ddagrab":
         capture = [
             "-filter_complex",
-            "ddagrab=output_idx=%d:framerate=%d,scale_d3d11=%s:%s:format=nv12" %
-            (args.display, args.fps, width, height),
+            "ddagrab=output_idx=%d:framerate=%d" % (args.display, args.fps),
         ]
     else:
         vf = "scale=%s:%s:force_original_aspect_ratio=decrease,pad=%s:%s:(ow-iw)/2:(oh-ih)/2" % (
