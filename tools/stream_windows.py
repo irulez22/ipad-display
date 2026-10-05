@@ -561,6 +561,9 @@ def main():
         except KeyboardInterrupt:
             print("\nStopping...")
             interrupted = True
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as exc:
+            print("Transport disconnected: %s" % exc)
+            interrupted = False
         else:
             interrupted = False
         finally:
