@@ -10,10 +10,15 @@ Each frame contains a 4-byte unsigned big-endian payload length, a 1-byte packet
 | 0x02 | PING | Reserved | Reserved |
 | 0x03 | CONFIG | Reserved | Reserved |
 | 0x04 | DISCONNECT | Either | Empty |
-| 0x10 | TOUCH | iPad -> Windows | 5 bytes: phase (u8), normalized X (u16 BE), normalized Y (u16 BE) |
+| 0x10 | TOUCH_V1 | iPad -> Windows | Legacy 5-byte packet: phase (u8), normalized X (u16 BE), normalized Y (u16 BE) |
+| 0x11 | TOUCH_V2 | iPad -> Windows | count (u8), then count × 7-byte contacts: id (u16 BE), phase (u8), X (u16 BE), Y (u16 BE) |
 
 The parser reconstructs NAL units across network packet boundaries. SPS (NAL 7) and PPS (NAL 8) must precede picture data. Send regular IDR frames.
 
-Touch phases are 0=down, 1=move, 2=up, 3=cancel. X and Y are normalized to 0...65535 across the displayed iPad surface. The current Windows host maps these events to mouse move/down/up on the 1280x960 PadDisplay monitor.
+Touch phases are 0=down, 1=move, 2=up, 3=cancel. X and Y are normalized to 0...65535 across the displayed iPad surface.
 
-Future versions will replace mouse emulation with native Windows pointer/touch injection and will multiplex control, video, reverse input, audio and telemetry over TCP or usbmux.
+TOUCH_V2 assigns a stable contact ID to each UIKit UITouch for the lifetime of that finger contact and supports up to 10 simultaneous contacts. The Windows host maps those normalized contacts to the selected virtual monitor and injects them with the Win32 InitializeTouchInjection / InjectTouchInput APIs, so applications receive native Windows touch/pointer input rather than mouse emulation.
+
+TOUCH_V1 remains accepted by the Windows host as a single-contact compatibility path.
+
+Future protocol revisions may multiplex control, video, reverse input, audio and telemetry over TCP or usbmux.
