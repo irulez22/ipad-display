@@ -44,10 +44,11 @@ def main():
     if args.encoder == "nvenc":
         encode = [
             "-c:v", "h264_nvenc",
-            "-preset", "llhp",
+            "-preset", "p1",
+            "-tune", "ull",
             "-profile:v", "baseline",
             "-pix_fmt", "yuv420p",
-            "-rc", "cbr_ld_hq",
+            "-rc", "cbr",
             "-zerolatency", "1",
             "-delay", "0",
             "-b:v", args.bitrate,
