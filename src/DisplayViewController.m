@@ -11,7 +11,7 @@
 - (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; self.displayLayer.frame=self.view.bounds; self.statusLabel.frame=CGRectInset(self.view.bounds,40,40); }
 - (BOOL)prefersStatusBarHidden{return YES;} - (UIInterfaceOrientationMask)supportedInterfaceOrientations{return UIInterfaceOrientationMaskLandscape;}
 - (void)streamReceiverDidConnect:(PDStreamReceiver *)r { dispatch_async(dispatch_get_main_queue(), ^{self.statusLabel.hidden=NO; self.statusLabel.text=@"Connected - waiting for H.264";}); }
-- (void)streamReceiverDidDisconnect:(PDStreamReceiver *)r error:(NSError *)e { [self.parser reset]; [self.decoder reset]; dispatch_async(dispatch_get_main_queue(), ^{self.statusLabel.hidden=NO; self.statusLabel.text=@"Disconnected - waiting for connection";}); }
-- (void)streamReceiver:(PDStreamReceiver *)r didReceivePacketType:(uint8_t)t payload:(NSData *)p { if(t==0x01)[self.parser appendData:p]; else if(t==0x04)[r disconnectClient]; }
+- (void)streamReceiverDidDisconnect:(PDStreamReceiver *)r error:(NSError *)e { [self.parser flush]; [self.decoder reset]; dispatch_async(dispatch_get_main_queue(), ^{self.statusLabel.hidden=NO; self.statusLabel.text=@"Disconnected - waiting for connection";}); }
+- (void)streamReceiver:(PDStreamReceiver *)r didReceivePacketType:(uint8_t)t payload:(NSData *)p { if(t==0x01)[self.parser appendData:p]; else if(t==0x04){[self.parser flush];[r disconnectClient];} }
 - (void)h264Parser:(PDH264Parser *)p didOutputNALUnit:(NSData *)n type:(uint8_t)t { [self.decoder decodeNALUnit:n type:t]; if(t==5) dispatch_async(dispatch_get_main_queue(), ^{self.statusLabel.hidden=YES;}); }
 @end
