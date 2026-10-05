@@ -16,6 +16,8 @@ TOUCH_V1 = 0x10
 TOUCH_V2 = 0x11
 PORT = 4822
 MAX_TOUCH_CONTACTS = 10
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
 
 PT_TOUCH = 2
 TOUCH_FEEDBACK_DEFAULT = 0x1
@@ -67,6 +69,18 @@ class POINTER_TOUCH_INFO(ctypes.Structure):
         ("rcContactRaw", wintypes.RECT),
         ("orientation", wintypes.UINT),
         ("pressure", wintypes.UINT),
+    ]
+
+
+class POINTER_TYPE_INFO_UNION(ctypes.Union):
+    _fields_ = [("touchInfo", POINTER_TOUCH_INFO)]
+
+
+class POINTER_TYPE_INFO(ctypes.Structure):
+    _anonymous_ = ("info",)
+    _fields_ = [
+        ("type", wintypes.DWORD),
+        ("info", POINTER_TYPE_INFO_UNION),
     ]
 
 
@@ -135,17 +149,35 @@ class NativeTouchInjector:
         self.monitor_rect = monitor_rect
         self.max_contacts = max_contacts
         self.active = {}
+        self.synthetic_device = None
 
-        self.user32.InitializeTouchInjection.argtypes = [wintypes.UINT, wintypes.DWORD]
-        self.user32.InitializeTouchInjection.restype = wintypes.BOOL
-        self.user32.InjectTouchInput.argtypes = [
-            wintypes.UINT,
-            ctypes.POINTER(POINTER_TOUCH_INFO),
-        ]
-        self.user32.InjectTouchInput.restype = wintypes.BOOL
+        create_synth = getattr(self.user32, "CreateSyntheticPointerDevice", None)
+        inject_synth = getattr(self.user32, "InjectSyntheticPointerInput", None)
+        if create_synth is not None and inject_synth is not None:
+            create_synth.argtypes = [wintypes.DWORD, wintypes.ULONG, wintypes.DWORD]
+            create_synth.restype = wintypes.HANDLE
+            inject_synth.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(POINTER_TYPE_INFO),
+                wintypes.UINT,
+            ]
+            inject_synth.restype = wintypes.BOOL
+            device = create_synth(PT_TOUCH, max_contacts, TOUCH_FEEDBACK_DEFAULT)
+            if device:
+                self.synthetic_device = device
+                self.inject_synthetic = inject_synth
 
-        if not self.user32.InitializeTouchInjection(max_contacts, TOUCH_FEEDBACK_DEFAULT):
-            raise ctypes.WinError(ctypes.get_last_error())
+        if self.synthetic_device is None:
+            self.user32.InitializeTouchInjection.argtypes = [wintypes.UINT, wintypes.DWORD]
+            self.user32.InitializeTouchInjection.restype = wintypes.BOOL
+            self.user32.InjectTouchInput.argtypes = [
+                wintypes.UINT,
+                ctypes.POINTER(POINTER_TOUCH_INFO),
+            ]
+            self.user32.InjectTouchInput.restype = wintypes.BOOL
+
+            if not self.user32.InitializeTouchInjection(max_contacts, TOUCH_FEEDBACK_DEFAULT):
+                raise ctypes.WinError(ctypes.get_last_error())
 
     def _screen_point(self, x_norm, y_norm):
         left, top, right, bottom = self.monitor_rect
@@ -237,8 +269,23 @@ class NativeTouchInjector:
             )
 
         ctypes.set_last_error(0)
-        if not self.user32.InjectTouchInput(len(frame), native):
-            raise ctypes.WinError(ctypes.get_last_error())
+        if self.synthetic_device is not None:
+            vx = self.user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+            vy = self.user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+            synth_type = POINTER_TYPE_INFO * len(frame)
+            synth = synth_type()
+            for i in range(len(frame)):
+                synth[i].type = PT_TOUCH
+                synth[i].touchInfo = native[i]
+                synth[i].touchInfo.pointerInfo.ptPixelLocation.x -= vx
+                synth[i].touchInfo.pointerInfo.ptPixelLocation.y -= vy
+                synth[i].touchInfo.pointerInfo.ptPixelLocationRaw.x -= vx
+                synth[i].touchInfo.pointerInfo.ptPixelLocationRaw.y -= vy
+            if not self.inject_synthetic(self.synthetic_device, synth, len(frame)):
+                raise ctypes.WinError(ctypes.get_last_error())
+        else:
+            if not self.user32.InjectTouchInput(len(frame), native):
+                raise ctypes.WinError(ctypes.get_last_error())
 
         for contact_id, phase, x_norm, y_norm in frame:
             if phase in (PD_TOUCH_DOWN, PD_TOUCH_MOVE):
@@ -280,6 +327,7 @@ def input_loop(sock, monitor_rect):
         return
 
     print("Touch: native Windows multi-touch mapped to monitor rect %s" % (monitor_rect,))
+    print("Touch injector: %s" % ("synthetic pointer device" if injector.synthetic_device is not None else "legacy InjectTouchInput fallback"))
     print("Touch ABI: POINTER_INFO=%d bytes, POINTER_TOUCH_INFO=%d bytes" % (
         ctypes.sizeof(POINTER_INFO), ctypes.sizeof(POINTER_TOUCH_INFO)
     ))
