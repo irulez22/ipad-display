@@ -20,11 +20,8 @@ MAX_TOUCH_CONTACTS = 10
 PT_TOUCH = 2
 TOUCH_FEEDBACK_NONE = 0x3
 
-POINTER_FLAG_NEW = 0x00000001
 POINTER_FLAG_INRANGE = 0x00000002
 POINTER_FLAG_INCONTACT = 0x00000004
-POINTER_FLAG_PRIMARY = 0x00002000
-POINTER_FLAG_CANCELED = 0x00008000
 POINTER_FLAG_DOWN = 0x00010000
 POINTER_FLAG_UPDATE = 0x00020000
 POINTER_FLAG_UP = 0x00040000
@@ -166,8 +163,7 @@ class NativeTouchInjector:
 
         if phase == PD_TOUCH_DOWN:
             pi.pointerFlags = (
-                POINTER_FLAG_NEW
-                | POINTER_FLAG_INRANGE
+                POINTER_FLAG_INRANGE
                 | POINTER_FLAG_INCONTACT
                 | POINTER_FLAG_DOWN
             )
@@ -179,23 +175,12 @@ class NativeTouchInjector:
             )
         else:
             pi.pointerFlags = POINTER_FLAG_UP
-            if phase == PD_TOUCH_CANCEL:
-                pi.pointerFlags |= POINTER_FLAG_CANCELED
 
-        if primary:
-            pi.pointerFlags |= POINTER_FLAG_PRIMARY
-
+        # Keep optional touch fields disabled until the basic injection path is
+        # stable. Windows only reads rcContact/orientation/pressure when the
+        # corresponding touchMask bits are set.
         contact.touchFlags = 0
-        contact.touchMask = (
-            TOUCH_MASK_CONTACTAREA
-            | TOUCH_MASK_ORIENTATION
-            | TOUCH_MASK_PRESSURE
-        )
-        radius = 3
-        contact.rcContact = wintypes.RECT(x - radius, y - radius, x + radius, y + radius)
-        contact.rcContactRaw = contact.rcContact
-        contact.orientation = 90
-        contact.pressure = 32000
+        contact.touchMask = 0
         return contact
 
     def inject(self, contacts):
@@ -228,12 +213,6 @@ class NativeTouchInjector:
         if not frame:
             return
 
-        active_after_downs = set(self.active)
-        active_after_downs.update(
-            contact_id for contact_id, phase, _, _ in frame if phase == PD_TOUCH_DOWN
-        )
-        primary_id = min(active_after_downs) if active_after_downs else None
-
         array_type = POINTER_TOUCH_INFO * len(frame)
         native = array_type()
         for i, (contact_id, phase, x_norm, y_norm) in enumerate(frame):
@@ -242,7 +221,7 @@ class NativeTouchInjector:
                 phase,
                 x_norm,
                 y_norm,
-                primary=(contact_id == primary_id),
+                primary=False,
             )
 
         if not self.user32.InjectTouchInput(len(frame), native):
@@ -288,6 +267,9 @@ def input_loop(sock, monitor_rect):
         return
 
     print("Touch: native Windows multi-touch mapped to monitor rect %s" % (monitor_rect,))
+    print("Touch ABI: POINTER_INFO=%d bytes, POINTER_TOUCH_INFO=%d bytes" % (
+        ctypes.sizeof(POINTER_INFO), ctypes.sizeof(POINTER_TOUCH_INFO)
+    ))
     saw_touch = False
 
     try:
