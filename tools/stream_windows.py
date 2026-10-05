@@ -24,7 +24,8 @@ def main():
     p.add_argument("--chunk", type=int, default=4096)
     p.add_argument("--encoder", choices=("nvenc", "x264"), default="nvenc")
     p.add_argument("--capture", choices=("ddagrab", "gdigrab"), default="ddagrab")
-    p.add_argument("--display", type=int, default=0)
+    p.add_argument("--display", type=int, default=0, help="DXGI output index on the selected adapter")
+    p.add_argument("--adapter", type=int, default=None, help="Direct3D 11 adapter index for ddagrab")
     args = p.parse_args()
 
     if shutil.which(args.ffmpeg) is None and args.ffmpeg == "ffmpeg":
@@ -33,7 +34,13 @@ def main():
     width, height = args.size.lower().split("x", 1)
 
     if args.capture == "ddagrab":
-        capture = [
+        capture = []
+        if args.adapter is not None:
+            capture += [
+                "-init_hw_device", "d3d11va=grab:%d" % args.adapter,
+                "-filter_hw_device", "grab",
+            ]
+        capture += [
             "-filter_complex",
             "ddagrab=output_idx=%d:framerate=%d" % (args.display, args.fps),
         ]
@@ -88,7 +95,9 @@ def main():
     print("Connecting to %s:%d..." % (args.host, PORT))
     print("Capture: %s%s, encoder: %s, resolution: %s, fps: %d, bitrate: %s" % (
         args.capture,
-        " display %d" % args.display if args.capture == "ddagrab" else "",
+        (" adapter %d display %d" % (args.adapter, args.display)
+         if args.capture == "ddagrab" and args.adapter is not None
+         else " display %d" % args.display if args.capture == "ddagrab" else ""),
         args.encoder, args.size, args.fps, args.bitrate
     ))
 
