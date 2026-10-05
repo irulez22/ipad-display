@@ -1,6 +1,7 @@
 #import "PDStreamReceiver.h"
 #import <sys/socket.h>
 #import <netinet/in.h>
+#import <netinet/tcp.h>
 #import <unistd.h>
 
 static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
@@ -100,6 +101,11 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
     while (self.listenFD >= 0) {
         int client = accept(self.listenFD, NULL, NULL);
         if (client < 0) continue;
+
+        int one = 1;
+        setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+        setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+        setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
         self.clientFD = client;
         id<PDStreamReceiverDelegate> delegate = self.delegate;
