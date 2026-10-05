@@ -1,4 +1,11 @@
 $ErrorActionPreference = "Stop"
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  $arg = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
+  Start-Process powershell.exe -Verb RunAs -ArgumentList $arg
+  exit 0
+}
 $ipadIp = "192.168.68.51"
 $repo = "\\wsl$\Ubuntu\home\josh\ipad-display"
 $streamer = "$repo\tools\stream_windows.py"
