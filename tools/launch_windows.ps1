@@ -112,5 +112,5 @@ if($null -eq $foundAdapter){throw "Could not find $size through DXGI ddagrab."}
 
 Write-Host "Streaming $size @ $fps, $bitrate, DXGI adapter $foundAdapter output $foundOutput"
 Write-Host "Touch: native Windows multi-touch"
-& python $streamer $ipadIp --ffmpeg $ffmpeg --capture ddagrab --adapter $foundAdapter --display $foundOutput --fps $fps --bitrate $bitrate --size $size
+& python $streamer $ipadIp --ffmpeg $ffmpeg --capture ddagrab --adapter $foundAdapter --display $foundOutput --fps $fps --bitrate $bitrate --size $size --touch-left $screen.Bounds.X --touch-top $screen.Bounds.Y --touch-width $mode.W --touch-height $mode.H
 exit $LASTEXITCODE
