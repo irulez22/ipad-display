@@ -4,11 +4,12 @@
 #import "PDVideoDecoder.h"
 #import <AVFoundation/AVFoundation.h>
 
-static const uint8_t PD_PACKET_TOUCH = 0x10;
+static const uint8_t PD_PACKET_TOUCH_V2 = 0x11;
 static const uint8_t PD_TOUCH_DOWN = 0;
 static const uint8_t PD_TOUCH_MOVE = 1;
 static const uint8_t PD_TOUCH_UP = 2;
 static const uint8_t PD_TOUCH_CANCEL = 3;
+static const NSUInteger PD_MAX_TOUCHES = 10;
 
 @interface DisplayViewController () <PDStreamReceiverDelegate, PDH264ParserDelegate, PDVideoDecoderDelegate>
 @property(nonatomic,strong) AVSampleBufferDisplayLayer *displayLayer;
@@ -16,6 +17,8 @@ static const uint8_t PD_TOUCH_CANCEL = 3;
 @property(nonatomic,strong) PDStreamReceiver *receiver;
 @property(nonatomic,strong) PDH264Parser *parser;
 @property(nonatomic,strong) PDVideoDecoder *decoder;
+@property(nonatomic,strong) NSMutableDictionary *touchIDs;
+@property(nonatomic) uint16_t nextTouchID;
 @property(nonatomic) BOOL videoReady;
 @end
 
@@ -27,6 +30,8 @@ static const uint8_t PD_TOUCH_CANCEL = 3;
 
     self.view.backgroundColor = [UIColor blackColor];
     self.view.multipleTouchEnabled = YES;
+    self.touchIDs = [NSMutableDictionary dictionary];
+    self.nextTouchID = 0;
 
     self.displayLayer = [[AVSampleBufferDisplayLayer alloc] init];
     self.displayLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
@@ -73,6 +78,7 @@ static const uint8_t PD_TOUCH_CANCEL = 3;
 - (void)streamReceiverDidDisconnect:(PDStreamReceiver *)receiver error:(NSError *)error
 {
     self.videoReady = NO;
+    [self.touchIDs removeAllObjects];
     [self.parser flush];
     [self.decoder flush];
     [self.decoder reset];
@@ -110,7 +116,6 @@ static const uint8_t PD_TOUCH_CANCEL = 3;
     }
 
     if (self.videoReady) {
-        // Do not flash routine decoder/frame diagnostics over a working display.
         return;
     }
 
@@ -120,50 +125,87 @@ static const uint8_t PD_TOUCH_CANCEL = 3;
     });
 }
 
-- (void)sendTouch:(UITouch *)touch phase:(uint8_t)phase
+- (NSValue *)keyForTouch:(UITouch *)touch
 {
-    if (!self.receiver || self.view.bounds.size.width <= 0 || self.view.bounds.size.height <= 0) return;
+    return [NSValue valueWithNonretainedObject:touch];
+}
 
-    CGPoint point = [touch locationInView:self.view];
-    CGFloat nx = MIN(1.0, MAX(0.0, point.x / self.view.bounds.size.width));
-    CGFloat ny = MIN(1.0, MAX(0.0, point.y / self.view.bounds.size.height));
+- (uint16_t)touchIDForTouch:(UITouch *)touch create:(BOOL)create
+{
+    NSValue *key = [self keyForTouch:touch];
+    NSNumber *existing = self.touchIDs[key];
+    if (existing) return (uint16_t)[existing unsignedIntValue];
+    if (!create || self.touchIDs.count >= PD_MAX_TOUCHES) return UINT16_MAX;
 
-    uint16_t x = (uint16_t)lrint(nx * 65535.0);
-    uint16_t y = (uint16_t)lrint(ny * 65535.0);
+    uint16_t candidate = self.nextTouchID++;
+    self.touchIDs[key] = @(candidate);
+    return candidate;
+}
 
-    uint8_t bytes[5];
-    bytes[0] = phase;
-    bytes[1] = (uint8_t)(x >> 8);
-    bytes[2] = (uint8_t)(x & 0xff);
-    bytes[3] = (uint8_t)(y >> 8);
-    bytes[4] = (uint8_t)(y & 0xff);
+- (void)sendTouches:(NSSet *)touches phase:(uint8_t)phase
+{
+    if (!self.receiver || touches.count == 0 ||
+        self.view.bounds.size.width <= 0 || self.view.bounds.size.height <= 0) return;
 
-    NSData *payload = [NSData dataWithBytes:bytes length:sizeof(bytes)];
-    [self.receiver sendPacketType:PD_PACKET_TOUCH payload:payload];
+    NSMutableArray *encoded = [NSMutableArray array];
+    for (UITouch *touch in touches) {
+        BOOL create = (phase == PD_TOUCH_DOWN);
+        uint16_t touchID = [self touchIDForTouch:touch create:create];
+        if (touchID == UINT16_MAX) continue;
+
+        CGPoint point = [touch locationInView:self.view];
+        CGFloat nx = MIN(1.0, MAX(0.0, point.x / self.view.bounds.size.width));
+        CGFloat ny = MIN(1.0, MAX(0.0, point.y / self.view.bounds.size.height));
+        uint16_t x = (uint16_t)lrint(nx * 65535.0);
+        uint16_t y = (uint16_t)lrint(ny * 65535.0);
+
+        uint8_t bytes[7];
+        bytes[0] = (uint8_t)(touchID >> 8);
+        bytes[1] = (uint8_t)(touchID & 0xff);
+        bytes[2] = phase;
+        bytes[3] = (uint8_t)(x >> 8);
+        bytes[4] = (uint8_t)(x & 0xff);
+        bytes[5] = (uint8_t)(y >> 8);
+        bytes[6] = (uint8_t)(y & 0xff);
+        [encoded addObject:[NSData dataWithBytes:bytes length:sizeof(bytes)]];
+    }
+
+    if (encoded.count == 0) return;
+
+    NSMutableData *payload = [NSMutableData dataWithCapacity:1 + encoded.count * 7];
+    uint8_t count = (uint8_t)encoded.count;
+    [payload appendBytes:&count length:1];
+    for (NSData *entry in encoded) {
+        [payload appendData:entry];
+    }
+
+    [self.receiver sendPacketType:PD_PACKET_TOUCH_V2 payload:payload];
+
+    if (phase == PD_TOUCH_UP || phase == PD_TOUCH_CANCEL) {
+        for (UITouch *touch in touches) {
+            [self.touchIDs removeObjectForKey:[self keyForTouch:touch]];
+        }
+    }
 }
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event
 {
-    UITouch *touch = [touches anyObject];
-    if (touch) [self sendTouch:touch phase:PD_TOUCH_DOWN];
+    [self sendTouches:touches phase:PD_TOUCH_DOWN];
 }
 
 - (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event
 {
-    UITouch *touch = [touches anyObject];
-    if (touch) [self sendTouch:touch phase:PD_TOUCH_MOVE];
+    [self sendTouches:touches phase:PD_TOUCH_MOVE];
 }
 
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event
 {
-    UITouch *touch = [touches anyObject];
-    if (touch) [self sendTouch:touch phase:PD_TOUCH_UP];
+    [self sendTouches:touches phase:PD_TOUCH_UP];
 }
 
 - (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event
 {
-    UITouch *touch = [touches anyObject];
-    if (touch) [self sendTouch:touch phase:PD_TOUCH_CANCEL];
+    [self sendTouches:touches phase:PD_TOUCH_CANCEL];
 }
 
 @end
