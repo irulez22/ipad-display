@@ -199,6 +199,7 @@ if($null -eq $foundAdapter){throw "Could not find $size through DXGI ddagrab."}
 
 Write-Host "Streaming $size @ $fps, $bitrate, DXGI adapter $foundAdapter output $foundOutput"
 Write-Host "Touch: native Windows multi-touch"
+Write-Host "Controls: press R to change settings, Q to quit." -ForegroundColor DarkGray
 $pythonExe = (Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
 if (-not $pythonExe) { $pythonExe = (Get-Command python -ErrorAction Stop | Select-Object -First 1).Source }
 $usbProxy = $null
@@ -252,6 +253,28 @@ while ($true) {
   $switchToUsb = $false
 
   while (-not $streamProc.HasExited) {
+    if ([Console]::KeyAvailable) {
+      $key = [Console]::ReadKey($true).Key
+      if ($key -eq [ConsoleKey]::R) {
+        Write-Host ""
+        Write-Host "Reopening PadDisplay settings..." -ForegroundColor Cyan
+        Stop-StreamerTree $streamProc
+        if ($usbProxy -and -not $usbProxy.HasExited) { $usbProxy | Stop-Process -Force -ErrorAction SilentlyContinue }
+        Clear-UsbDeviceEvents
+        $arg = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
+        Start-Process powershell.exe -Verb RunAs -ArgumentList $arg
+        exit 0
+      }
+      if ($key -eq [ConsoleKey]::Q) {
+        Write-Host ""
+        Write-Host "Stopping PadDisplay..." -ForegroundColor Yellow
+        Stop-StreamerTree $streamProc
+        if ($usbProxy -and -not $usbProxy.HasExited) { $usbProxy | Stop-Process -Force -ErrorAction SilentlyContinue }
+        Clear-UsbDeviceEvents
+        exit 0
+      }
+    }
+
     $evt = Wait-Event -SourceIdentifier "PadDisplay.DeviceChange" -Timeout 1
     if ($evt) {
       Remove-Event -EventIdentifier $evt.EventIdentifier -ErrorAction SilentlyContinue
