@@ -24,6 +24,7 @@ POINTER_FLAG_NEW = 0x00000001
 POINTER_FLAG_INRANGE = 0x00000002
 POINTER_FLAG_INCONTACT = 0x00000004
 POINTER_FLAG_PRIMARY = 0x00002000
+POINTER_FLAG_CANCELED = 0x00008000
 POINTER_FLAG_DOWN = 0x00010000
 POINTER_FLAG_UPDATE = 0x00020000
 POINTER_FLAG_UP = 0x00040000
@@ -132,10 +133,10 @@ class NativeTouchInjector:
         if monitor_rect is None:
             raise RuntimeError("No matching Windows monitor was found for touch mapping")
 
-        self.user32 = ctypes.windll.user32
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
         self.monitor_rect = monitor_rect
         self.max_contacts = max_contacts
-        self.active = set()
+        self.active = {}
 
         self.user32.InitializeTouchInjection.argtypes = [wintypes.UINT, wintypes.DWORD]
         self.user32.InitializeTouchInjection.restype = wintypes.BOOL
@@ -178,6 +179,8 @@ class NativeTouchInjector:
             )
         else:
             pi.pointerFlags = POINTER_FLAG_UP
+            if phase == PD_TOUCH_CANCEL:
+                pi.pointerFlags |= POINTER_FLAG_CANCELED
 
         if primary:
             pi.pointerFlags |= POINTER_FLAG_PRIMARY
@@ -199,14 +202,41 @@ class NativeTouchInjector:
         if not contacts:
             return
 
-        array_type = POINTER_TOUCH_INFO * len(contacts)
+        changes = {contact_id: (phase, x, y) for contact_id, phase, x, y in contacts}
+
+        # InjectTouchInput expects each frame to describe all contacts on the
+        # desktop, not just the contacts that changed since the previous frame.
+        frame = []
+
+        # Existing contacts first. UP/CANCEL must use the previous injected
+        # position or Windows rejects the whole sequence.
+        for contact_id, (old_x, old_y) in list(self.active.items()):
+            if contact_id in changes:
+                phase, new_x, new_y = changes[contact_id]
+                if phase in (PD_TOUCH_UP, PD_TOUCH_CANCEL):
+                    frame.append((contact_id, phase, old_x, old_y))
+                else:
+                    frame.append((contact_id, PD_TOUCH_MOVE, new_x, new_y))
+            else:
+                frame.append((contact_id, PD_TOUCH_MOVE, old_x, old_y))
+
+        # Add genuinely new contacts.
+        for contact_id, (phase, x, y) in changes.items():
+            if contact_id not in self.active and phase == PD_TOUCH_DOWN:
+                frame.append((contact_id, PD_TOUCH_DOWN, x, y))
+
+        if not frame:
+            return
+
+        active_after_downs = set(self.active)
+        active_after_downs.update(
+            contact_id for contact_id, phase, _, _ in frame if phase == PD_TOUCH_DOWN
+        )
+        primary_id = min(active_after_downs) if active_after_downs else None
+
+        array_type = POINTER_TOUCH_INFO * len(frame)
         native = array_type()
-
-        down_ids = {c[0] for c in contacts if c[1] == PD_TOUCH_DOWN}
-        future_active = set(self.active) | down_ids
-        primary_id = min(future_active) if future_active else None
-
-        for i, (contact_id, phase, x_norm, y_norm) in enumerate(contacts):
+        for i, (contact_id, phase, x_norm, y_norm) in enumerate(frame):
             native[i] = self._make_contact(
                 contact_id,
                 phase,
@@ -215,14 +245,14 @@ class NativeTouchInjector:
                 primary=(contact_id == primary_id),
             )
 
-        if not self.user32.InjectTouchInput(len(contacts), native):
+        if not self.user32.InjectTouchInput(len(frame), native):
             raise ctypes.WinError(ctypes.get_last_error())
 
-        for contact_id, phase, _, _ in contacts:
-            if phase == PD_TOUCH_DOWN:
-                self.active.add(contact_id)
+        for contact_id, phase, x_norm, y_norm in frame:
+            if phase in (PD_TOUCH_DOWN, PD_TOUCH_MOVE):
+                self.active[contact_id] = (x_norm, y_norm)
             elif phase in (PD_TOUCH_UP, PD_TOUCH_CANCEL):
-                self.active.discard(contact_id)
+                self.active.pop(contact_id, None)
 
 
 def parse_touch_v2(payload):
@@ -258,6 +288,7 @@ def input_loop(sock, monitor_rect):
         return
 
     print("Touch: native Windows multi-touch mapped to monitor rect %s" % (monitor_rect,))
+    saw_touch = False
 
     try:
         while True:
@@ -272,6 +303,9 @@ def input_loop(sock, monitor_rect):
             if packet_type == TOUCH_V2:
                 contacts = parse_touch_v2(payload)
                 if contacts:
+                    if not saw_touch:
+                        print("Touch: received first TOUCH_V2 packet from iPad (%d contact(s))." % len(contacts))
+                        saw_touch = True
                     injector.inject(contacts)
             elif packet_type == TOUCH_V1 and len(payload) == 5:
                 phase = payload[0]
