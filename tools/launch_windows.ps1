@@ -60,6 +60,15 @@ function Start-UsbProxy {
   if ($p -and -not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
   return $null
 }
+function Register-UsbDeviceEvents {
+  Unregister-Event -SourceIdentifier "PadDisplay.DeviceChange" -ErrorAction SilentlyContinue
+  Register-WmiEvent -Class Win32_DeviceChangeEvent -SourceIdentifier "PadDisplay.DeviceChange" | Out-Null
+}
+
+function Clear-UsbDeviceEvents {
+  Unregister-Event -SourceIdentifier "PadDisplay.DeviceChange" -ErrorAction SilentlyContinue
+  Remove-Event -SourceIdentifier "PadDisplay.DeviceChange" -ErrorAction SilentlyContinue
+}
 
 function Read-Choice($Prompt, $Default, $Min, $Max) {
   while ($true) {
@@ -181,6 +190,7 @@ $pythonExe = (Get-Command python.exe -ErrorAction SilentlyContinue | Select-Obje
 if (-not $pythonExe) { $pythonExe = (Get-Command python -ErrorAction Stop | Select-Object -First 1).Source }
 $usbProxy = $null
 $forceWifiNext = $false
+Register-UsbDeviceEvents
 
 function Stop-StreamerTree($Process) {
   if ($Process -and -not $Process.HasExited) {
@@ -229,18 +239,24 @@ while ($true) {
   $switchToUsb = $false
 
   while (-not $streamProc.HasExited) {
-    Start-Sleep -Milliseconds 750
+    $evt = Wait-Event -SourceIdentifier "PadDisplay.DeviceChange" -Timeout 1
+    if ($evt) {
+      Remove-Event -EventIdentifier $evt.EventIdentifier -ErrorAction SilentlyContinue
 
-    if (-not $usingUsb) {
-      if (-not $usbProxy -or $usbProxy.HasExited) {
+      if (-not $usingUsb) {
+        if ($usbProxy -and -not $usbProxy.HasExited) {
+          $usbProxy | Stop-Process -Force -ErrorAction SilentlyContinue
+          $usbProxy = $null
+        }
+
         $usbProxy = Start-UsbProxy
-      }
-      if ($usbProxy -and -not $usbProxy.HasExited -and (Test-TcpPort "127.0.0.1" 4823 250)) {
-        Write-Host ""
-        Write-Host "USB detected; switching from Wi-Fi to preferred USB transport..." -ForegroundColor Green
-        $switchToUsb = $true
-        Stop-StreamerTree $streamProc
-        break
+        if ($usbProxy -and -not $usbProxy.HasExited -and (Test-TcpPort "127.0.0.1" 4823 250)) {
+          Write-Host ""
+          Write-Host "USB device event detected; switching from Wi-Fi to preferred USB transport..." -ForegroundColor Green
+          $switchToUsb = $true
+          Stop-StreamerTree $streamProc
+          break
+        }
       }
     }
   }
@@ -255,6 +271,7 @@ while ($true) {
   $code = $streamProc.ExitCode
   if ($code -eq 130) {
     if ($usbProxy -and -not $usbProxy.HasExited) { $usbProxy | Stop-Process -Force -ErrorAction SilentlyContinue }
+    Clear-UsbDeviceEvents
     exit 0
   }
 
