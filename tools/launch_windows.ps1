@@ -49,14 +49,27 @@ function Test-TcpPort($HostName, $Port, $TimeoutMs=400) {
   } catch { return $false } finally { $client.Close() }
 }
 
+function Get-UsbDeviceUdid {
+  $ideviceId = (Get-Command idevice_id.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+  if (-not $ideviceId) { $ideviceId = (Get-Command idevice_id -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
+  if (-not $ideviceId) { return $null }
+  try {
+    $ids = @(& $ideviceId -l 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($ids.Count -gt 0) { return [string]$ids[0] }
+  } catch {}
+  return $null
+}
+
 function Start-UsbProxy {
+  $udid = Get-UsbDeviceUdid
+  if (-not $udid) { return $null }
   $iproxy = (Get-Command iproxy.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
   if (-not $iproxy) { $iproxy = (Get-Command iproxy -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
   if (-not $iproxy) { return $null }
   Get-Process iproxy -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  $p = Start-Process -FilePath $iproxy -ArgumentList "4823:4822" -WindowStyle Hidden -PassThru
+  $p = Start-Process -FilePath $iproxy -ArgumentList @("-u",$udid,"4823:4822") -WindowStyle Hidden -PassThru
   Start-Sleep -Milliseconds 700
-  if (Test-TcpPort "127.0.0.1" 4823 500) { return $p }
+  if ((Get-UsbDeviceUdid) -and (Test-TcpPort "127.0.0.1" 4823 500)) { return $p }
   if ($p -and -not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
   return $null
 }
@@ -205,7 +218,7 @@ while ($true) {
     if (-not $usbProxy -or $usbProxy.HasExited -or -not (Test-TcpPort "127.0.0.1" 4823 250)) {
       $usbProxy = Start-UsbProxy
     }
-    if ($usbProxy -and -not $usbProxy.HasExited -and (Test-TcpPort "127.0.0.1" 4823 250)) {
+    if ($usbProxy -and -not $usbProxy.HasExited -and (Get-UsbDeviceUdid) -and (Test-TcpPort "127.0.0.1" 4823 250)) {
       $usingUsb = $true
       $targetHost = "127.0.0.1"
       $targetPort = 4823
@@ -249,8 +262,8 @@ while ($true) {
           $usbProxy = $null
         }
 
-        $usbProxy = Start-UsbProxy
-        if ($usbProxy -and -not $usbProxy.HasExited -and (Test-TcpPort "127.0.0.1" 4823 250)) {
+        if (Get-UsbDeviceUdid) { $usbProxy = Start-UsbProxy } else { $usbProxy = $null }
+        if ($usbProxy -and -not $usbProxy.HasExited -and (Get-UsbDeviceUdid) -and (Test-TcpPort "127.0.0.1" 4823 250)) {
           Write-Host ""
           Write-Host "USB device event detected; switching from Wi-Fi to preferred USB transport..." -ForegroundColor Green
           $switchToUsb = $true
