@@ -533,6 +533,9 @@ def main():
                 send_packet(sock, VIDEO_H264, data)
         except KeyboardInterrupt:
             print("\nStopping...")
+            interrupted = True
+        else:
+            interrupted = False
         finally:
             if proc.poll() is None:
                 proc.terminate()
@@ -545,6 +548,9 @@ def main():
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+
+        if interrupted:
+            raise SystemExit(130)
 
 
 if __name__ == "__main__":
