@@ -8,5 +8,6 @@
 @property(nonatomic,weak) id<PDVideoDecoderDelegate> delegate;
 - (instancetype)initWithDisplayLayer:(AVSampleBufferDisplayLayer*)layer;
 - (void)decodeNALUnit:(NSData*)nalUnit type:(uint8_t)type;
+- (void)flush;
 - (void)reset;
 @end
