@@ -363,7 +363,8 @@ def input_loop(sock, monitor_rect):
 
 def main():
     p = argparse.ArgumentParser(description="Stream the Windows desktop to PadDisplay")
-    p.add_argument("host", help="iPad IP address")
+    p.add_argument("host", help="iPad IP address or localhost proxy")
+    p.add_argument("--port", type=int, default=PORT, help="TCP port")
     p.add_argument("--ffmpeg", default="ffmpeg", help="FFmpeg executable/path")
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--size", default="1280x960")
@@ -484,7 +485,7 @@ def main():
         "nobuffer",
     ] + capture + ["-an"] + encode + ["-f", "h264", "pipe:1"]
 
-    print("Connecting to %s:%d..." % (args.host, PORT))
+    print("Connecting to %s:%d..." % (args.host, args.port))
     print(
         "Capture: %s%s, encoder: %s, resolution: %s, fps: %d, bitrate: %s"
         % (
@@ -503,7 +504,7 @@ def main():
         )
     )
 
-    with socket.create_connection((args.host, PORT), timeout=5) as sock:
+    with socket.create_connection((args.host, args.port), timeout=5) as sock:
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
