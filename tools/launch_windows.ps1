@@ -120,7 +120,7 @@ $modes=@(
   @{W=1600;H=1200;B="10M"},
   @{W=2048;H=1536;B="16M"}
 )
-$mode=$modes[(Read-Choice "Resolution" 4 1 4)-1]
+$mode=$modes[(Read-Choice "Resolution" 2 1 4)-1]
 
 Write-Host "[1] 60 fps"
 Write-Host "[2] 30 fps"
