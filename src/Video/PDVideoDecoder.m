@@ -1,0 +1,12 @@
+#import "PDVideoDecoder.h"
+#import <CoreMedia/CoreMedia.h>
+@interface PDVideoDecoder ()
+@property(nonatomic,weak) AVSampleBufferDisplayLayer*displayLayer; @property(nonatomic,strong) NSData*sps; @property(nonatomic,strong) NSData*pps; @property(nonatomic) CMVideoFormatDescriptionRef formatDescription;
+@end
+@implementation PDVideoDecoder
+- (instancetype)initWithDisplayLayer:(AVSampleBufferDisplayLayer*)l{if((self=[super init]))_displayLayer=l;return self;}
+- (void)dealloc{if(_formatDescription)CFRelease(_formatDescription);}
+- (void)reset{self.sps=nil;self.pps=nil;if(self.formatDescription){CFRelease(self.formatDescription);self.formatDescription=NULL;}dispatch_async(dispatch_get_main_queue(), ^{[self.displayLayer flushAndRemoveImage];});}
+- (void)rebuild{if(!self.sps||!self.pps)return;const uint8_t*p[2]={self.sps.bytes,self.pps.bytes};const size_t z[2]={self.sps.length,self.pps.length};CMVideoFormatDescriptionRef f=NULL;OSStatus s=CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault,2,p,z,4,&f);if(s==noErr){if(self.formatDescription)CFRelease(self.formatDescription);self.formatDescription=f;}else if(f)CFRelease(f);}
+- (void)decodeNALUnit:(NSData*)nal type:(uint8_t)t{if(!nal.length)return;if(t==7){self.sps=[nal copy];[self rebuild];return;}if(t==8){self.pps=[nal copy];[self rebuild];return;}if(!self.formatDescription)return;uint32_t n=CFSwapInt32HostToBig((uint32_t)nal.length);NSMutableData*d=[NSMutableData dataWithBytes:&n length:4];[d appendData:nal];CMBlockBufferRef b=NULL;OSStatus s=CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault,NULL,d.length,kCFAllocatorDefault,NULL,0,d.length,0,&b);if(s!=kCMBlockBufferNoErr||!b)return;s=CMBlockBufferReplaceDataBytes(d.bytes,b,0,d.length);if(s!=kCMBlockBufferNoErr){CFRelease(b);return;}size_t size=d.length;CMSampleBufferRef sample=NULL;s=CMSampleBufferCreateReady(kCFAllocatorDefault,b,self.formatDescription,1,0,NULL,1,&size,&sample);CFRelease(b);if(s!=noErr||!sample)return;CFArrayRef aa=CMSampleBufferGetSampleAttachmentsArray(sample,YES);if(aa&&CFArrayGetCount(aa)){CFMutableDictionaryRef a=(CFMutableDictionaryRef)CFArrayGetValueAtIndex(aa,0);CFDictionarySetValue(a,kCMSampleAttachmentKey_DisplayImmediately,kCFBooleanTrue);}dispatch_async(dispatch_get_main_queue(), ^{if(self.displayLayer.status==AVQueuedSampleBufferRenderingStatusFailed)[self.displayLayer flush];[self.displayLayer enqueueSampleBuffer:sample];CFRelease(sample);});}
+@end
