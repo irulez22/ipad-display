@@ -296,6 +296,10 @@ def main():
     p.add_argument("--capture", choices=("ddagrab", "gdigrab"), default="ddagrab")
     p.add_argument("--display", type=int, default=0, help="DXGI output index on the selected adapter")
     p.add_argument("--adapter", type=int, default=None, help="Direct3D 11 adapter index for ddagrab")
+    p.add_argument("--touch-left", type=int, default=None)
+    p.add_argument("--touch-top", type=int, default=None)
+    p.add_argument("--touch-width", type=int, default=None)
+    p.add_argument("--touch-height", type=int, default=None)
     args = p.parse_args()
 
     if shutil.which(args.ffmpeg) is None and args.ffmpeg == "ffmpeg":
@@ -426,7 +430,15 @@ def main():
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-        monitor_rect = find_touch_monitor(width_i, height_i)
+        if None not in (args.touch_left, args.touch_top, args.touch_width, args.touch_height):
+            monitor_rect = (
+                args.touch_left,
+                args.touch_top,
+                args.touch_left + args.touch_width,
+                args.touch_top + args.touch_height,
+            )
+        else:
+            monitor_rect = find_touch_monitor(width_i, height_i)
         touch_thread = threading.Thread(
             target=input_loop,
             args=(sock, monitor_rect),
