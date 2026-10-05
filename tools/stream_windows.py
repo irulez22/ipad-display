@@ -84,6 +84,27 @@ class POINTER_TYPE_INFO(ctypes.Structure):
     ]
 
 
+def bitrate_to_bits_per_second(value):
+    text = str(value).strip().lower()
+    multiplier = 1
+    if text.endswith("k"):
+        multiplier = 1000
+        text = text[:-1]
+    elif text.endswith("m"):
+        multiplier = 1000 * 1000
+        text = text[:-1]
+    elif text.endswith("g"):
+        multiplier = 1000 * 1000 * 1000
+        text = text[:-1]
+    return int(float(text) * multiplier)
+
+
+def one_frame_vbv(bitrate, fps):
+    bits_per_second = bitrate_to_bits_per_second(bitrate)
+    bits_per_frame = max(64000, int(round(bits_per_second / max(1, fps))))
+    return "%dk" % max(1, int(round(bits_per_frame / 1000.0)))
+
+
 def send_packet(sock, packet_type, payload=b""):
     sock.sendall(struct.pack(">IB", len(payload), packet_type) + payload)
 
@@ -369,7 +390,7 @@ def main():
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--size", default="1280x960")
     p.add_argument("--bitrate", default="6M")
-    p.add_argument("--chunk", type=int, default=4096)
+    p.add_argument("--chunk", type=int, default=16384)
     p.add_argument("--encoder", choices=("nvenc", "x264"), default="nvenc")
     p.add_argument("--capture", choices=("ddagrab", "gdigrab"), default="ddagrab")
     p.add_argument("--display", type=int, default=0, help="DXGI output index on the selected adapter")
@@ -385,6 +406,7 @@ def main():
 
     width, height = args.size.lower().split("x", 1)
     width_i, height_i = int(width), int(height)
+    vbv_bufsize = one_frame_vbv(args.bitrate, args.fps)
 
     if args.capture == "ddagrab":
         capture = []
@@ -436,7 +458,9 @@ def main():
             "-maxrate",
             args.bitrate,
             "-bufsize",
-            args.bitrate,
+            vbv_bufsize,
+            "-rc-lookahead",
+            "0",
             "-g",
             str(args.fps),
             "-bf",
@@ -503,6 +527,8 @@ def main():
             args.bitrate,
         )
     )
+    if args.encoder == "nvenc":
+        print("NVENC low-latency: rc-lookahead=0, VBV=%s (~1 frame), no frame dropping" % vbv_bufsize)
 
     with socket.create_connection((args.host, args.port), timeout=5) as sock:
         sock.settimeout(None)
