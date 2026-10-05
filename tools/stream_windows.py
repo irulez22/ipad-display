@@ -18,10 +18,11 @@ PORT = 4822
 MAX_TOUCH_CONTACTS = 10
 
 PT_TOUCH = 2
-TOUCH_FEEDBACK_NONE = 0x3
+TOUCH_FEEDBACK_DEFAULT = 0x1
 
 POINTER_FLAG_INRANGE = 0x00000002
 POINTER_FLAG_INCONTACT = 0x00000004
+POINTER_FLAG_PRIMARY = 0x00002000
 POINTER_FLAG_DOWN = 0x00010000
 POINTER_FLAG_UPDATE = 0x00020000
 POINTER_FLAG_UP = 0x00040000
@@ -143,7 +144,7 @@ class NativeTouchInjector:
         ]
         self.user32.InjectTouchInput.restype = wintypes.BOOL
 
-        if not self.user32.InitializeTouchInjection(max_contacts, TOUCH_FEEDBACK_NONE):
+        if not self.user32.InitializeTouchInjection(max_contacts, TOUCH_FEEDBACK_DEFAULT):
             raise ctypes.WinError(ctypes.get_last_error())
 
     def _screen_point(self, x_norm, y_norm):
@@ -175,6 +176,9 @@ class NativeTouchInjector:
             )
         else:
             pi.pointerFlags = POINTER_FLAG_UP
+
+        if primary:
+            pi.pointerFlags |= POINTER_FLAG_PRIMARY
 
         # Keep optional touch fields disabled until the basic injection path is
         # stable. Windows only reads rcContact/orientation/pressure when the
@@ -213,6 +217,14 @@ class NativeTouchInjector:
         if not frame:
             return
 
+        active_after = set(self.active)
+        for contact_id, phase, _, _ in frame:
+            if phase == PD_TOUCH_DOWN:
+                active_after.add(contact_id)
+            elif phase in (PD_TOUCH_UP, PD_TOUCH_CANCEL):
+                active_after.discard(contact_id)
+        primary_id = min(set(self.active) | {c[0] for c in frame if c[1] == PD_TOUCH_DOWN}) if (self.active or any(c[1] == PD_TOUCH_DOWN for c in frame)) else None
+
         array_type = POINTER_TOUCH_INFO * len(frame)
         native = array_type()
         for i, (contact_id, phase, x_norm, y_norm) in enumerate(frame):
@@ -221,9 +233,10 @@ class NativeTouchInjector:
                 phase,
                 x_norm,
                 y_norm,
-                primary=False,
+                primary=(contact_id == primary_id),
             )
 
+        ctypes.set_last_error(0)
         if not self.user32.InjectTouchInput(len(frame), native):
             raise ctypes.WinError(ctypes.get_last_error())
 
