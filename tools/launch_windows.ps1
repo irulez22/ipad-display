@@ -177,8 +177,17 @@ if($null -eq $foundAdapter){throw "Could not find $size through DXGI ddagrab."}
 
 Write-Host "Streaming $size @ $fps, $bitrate, DXGI adapter $foundAdapter output $foundOutput"
 Write-Host "Touch: native Windows multi-touch"
+$pythonExe = (Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if (-not $pythonExe) { $pythonExe = (Get-Command python -ErrorAction Stop | Select-Object -First 1).Source }
 $usbProxy = $null
 $forceWifiNext = $false
+
+function Stop-StreamerTree($Process) {
+  if ($Process -and -not $Process.HasExited) {
+    & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+  }
+}
+
 while ($true) {
   $usingUsb = $false
 
@@ -186,12 +195,11 @@ while ($true) {
     if (-not $usbProxy -or $usbProxy.HasExited -or -not (Test-TcpPort "127.0.0.1" 4823 250)) {
       $usbProxy = Start-UsbProxy
     }
-
     if ($usbProxy -and -not $usbProxy.HasExited -and (Test-TcpPort "127.0.0.1" 4823 250)) {
       $usingUsb = $true
       $targetHost = "127.0.0.1"
       $targetPort = 4823
-      Write-Host "Transport: USB (usbmux / iproxy)" -ForegroundColor Green
+      Write-Host "Transport: USB (preferred)" -ForegroundColor Green
     }
   }
 
@@ -199,12 +207,52 @@ while ($true) {
     $forceWifiNext = $false
     $targetHost = $ipadIp
     $targetPort = 4822
-    Write-Host "Transport: Wi-Fi ($ipadIp)" -ForegroundColor Cyan
+    Write-Host "Transport: Wi-Fi fallback ($ipadIp)" -ForegroundColor Cyan
   }
 
-  & python $streamer $targetHost --port $targetPort --ffmpeg $ffmpeg --capture ddagrab --adapter $foundAdapter --display $foundOutput --fps $fps --bitrate $bitrate --size $size --touch-left $screen.Bounds.X --touch-top $screen.Bounds.Y --touch-width $mode.W --touch-height $mode.H
-  $code = $LASTEXITCODE
+  $streamArgs = @(
+    "`"$streamer`"", $targetHost,
+    "--port", [string]$targetPort,
+    "--ffmpeg", "`"$ffmpeg`"",
+    "--capture", "ddagrab",
+    "--adapter", [string]$foundAdapter,
+    "--display", [string]$foundOutput,
+    "--fps", [string]$fps,
+    "--bitrate", $bitrate,
+    "--size", $size,
+    "--touch-left", [string]$screen.Bounds.X,
+    "--touch-top", [string]$screen.Bounds.Y,
+    "--touch-width", [string]$mode.W,
+    "--touch-height", [string]$mode.H
+  )
+  $streamProc = Start-Process -FilePath $pythonExe -ArgumentList $streamArgs -NoNewWindow -PassThru
+  $switchToUsb = $false
 
+  while (-not $streamProc.HasExited) {
+    Start-Sleep -Milliseconds 750
+
+    if (-not $usingUsb) {
+      if (-not $usbProxy -or $usbProxy.HasExited) {
+        $usbProxy = Start-UsbProxy
+      }
+      if ($usbProxy -and -not $usbProxy.HasExited -and (Test-TcpPort "127.0.0.1" 4823 250)) {
+        Write-Host ""
+        Write-Host "USB detected; switching from Wi-Fi to preferred USB transport..." -ForegroundColor Green
+        $switchToUsb = $true
+        Stop-StreamerTree $streamProc
+        break
+      }
+    }
+  }
+
+  if ($switchToUsb) {
+    $forceWifiNext = $false
+    Start-Sleep -Milliseconds 500
+    continue
+  }
+
+  $streamProc.WaitForExit()
+  $code = $streamProc.ExitCode
   if ($code -eq 130) {
     if ($usbProxy -and -not $usbProxy.HasExited) { $usbProxy | Stop-Process -Force -ErrorAction SilentlyContinue }
     exit 0
@@ -212,15 +260,13 @@ while ($true) {
 
   if ($usingUsb) {
     Write-Host ""
-    Write-Host "USB stream dropped; forcing Wi-Fi fallback on the next attempt..." -ForegroundColor Yellow
-    if ($usbProxy -and -not $usbProxy.HasExited) {
-      $usbProxy | Stop-Process -Force -ErrorAction SilentlyContinue
-    }
+    Write-Host "USB stream dropped; falling back to Wi-Fi..." -ForegroundColor Yellow
+    if ($usbProxy -and -not $usbProxy.HasExited) { $usbProxy | Stop-Process -Force -ErrorAction SilentlyContinue }
     $usbProxy = $null
     $forceWifiNext = $true
   } else {
     Write-Host ""
-    Write-Host "Wi-Fi stream dropped; USB will be probed again on the next attempt..." -ForegroundColor Yellow
+    Write-Host "Wi-Fi stream dropped; USB will be preferred on reconnect..." -ForegroundColor Yellow
   }
 
   Start-Sleep 1
