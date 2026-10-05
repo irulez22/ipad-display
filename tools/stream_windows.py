@@ -53,7 +53,9 @@ def main():
             "-preset", "p1",
             "-tune", "ull",
             "-profile:v", "baseline",
-            "-pix_fmt", "nv12" if args.capture == "ddagrab" else "yuv420p",
+        ] + ([] if args.capture == "ddagrab" else [
+            "-pix_fmt", "yuv420p",
+        ]) + [
             "-rc", "cbr",
             "-b:v", args.bitrate,
             "-maxrate", args.bitrate,
