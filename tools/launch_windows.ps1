@@ -42,6 +42,36 @@ function Read-Choice($Prompt, $Default, $Min, $Max) {
   }
 }
 
+function Ensure-VddMode($Width, $Height, $Hz) {
+  $path = "C:\VirtualDisplayDriver\vdd_settings.xml"
+  if (-not (Test-Path $path)) { throw "VDD config not found at $path." }
+  [xml]$xml = Get-Content $path
+  if (-not $xml.vdd_settings.resolutions) { throw "VDD config has no <resolutions> section." }
+  $exists = $false
+  foreach ($r in @($xml.vdd_settings.resolutions.resolution)) {
+    if ([int]$r.width -eq $Width -and [int]$r.height -eq $Height -and [int]$r.refresh_rate -eq $Hz) { $exists = $true; break }
+  }
+  if ($exists) { return $false }
+  $res = $xml.CreateElement("resolution")
+  $w = $xml.CreateElement("width"); $w.InnerText = [string]$Width; [void]$res.AppendChild($w)
+  $h = $xml.CreateElement("height"); $h.InnerText = [string]$Height; [void]$res.AppendChild($h)
+  $rr = $xml.CreateElement("refresh_rate"); $rr.InnerText = [string]$Hz; [void]$res.AppendChild($rr)
+  [void]$xml.vdd_settings.resolutions.AppendChild($res)
+  $global = $xml.vdd_settings.global
+  if ($global) {
+    $haveGlobal = @($global.g_refresh_rate | ForEach-Object { [int]$_."#text" }) -contains $Hz
+    if (-not $haveGlobal) { $g = $xml.CreateElement("g_refresh_rate"); $g.InnerText = [string]$Hz; [void]$global.AppendChild($g) }
+  }
+  Copy-Item $path "$path.launcher.bak" -Force
+  $xml.Save($path)
+  Write-Host ("Added {0}x{1}@{2} to VDD config; restarting signed VDD..." -f $Width,$Height,$Hz)
+  Get-PnpDevice | Where-Object { $_.FriendlyName -eq "Virtual Display Driver" } | Disable-PnpDevice -Confirm:$false
+  Start-Sleep 2
+  Get-PnpDevice | Where-Object { $_.FriendlyName -eq "Virtual Display Driver" } | Enable-PnpDevice -Confirm:$false
+  Start-Sleep 4
+  return $true
+}
+
 function Set-DisplayMode($Device, $Width, $Height, $Hz) {
   $i = 0; $found = $null
   while ($true) {
@@ -91,6 +121,12 @@ $fps=if((Read-Choice "Frame rate" 1 1 2)-eq 1){60}else{30}
 $custom=Read-Host "Bitrate [$($mode.B)]"
 $bitrate=if([string]::IsNullOrWhiteSpace($custom)){$mode.B}else{$custom}
 
+$restarted = Ensure-VddMode $mode.W $mode.H $fps
+if ($restarted) {
+  $screens = @([System.Windows.Forms.Screen]::AllScreens)
+  $same = $screens | Where-Object { $_.DeviceName -eq $screen.DeviceName } | Select-Object -First 1
+  if ($same) { $screen = $same } else { $screen = $screens | Where-Object { -not $_.Primary } | Select-Object -Last 1 }
+}
 Set-DisplayMode $screen.DeviceName $mode.W $mode.H $fps
 Start-Sleep 2
 $size="$($mode.W)x$($mode.H)"
