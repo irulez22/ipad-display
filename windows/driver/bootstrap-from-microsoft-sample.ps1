@@ -96,7 +96,8 @@ Set-Content (Join-Path $driverOut "PadDisplayDriver.vcxproj.filters") $filters -
 
 $app = Get-Content (Join-Path $appOut "main.cpp") -Raw
 $app = $app.Replace('L"Idd Sample Driver"', 'L"PadDisplay Virtual Display"')
-$app = $app.Replace('L"IddSampleDriver\0\0"', 'L"PadDisplay\0\0"')
+$app = [regex]::Replace($app, 'PCWSTR hardwareIds\s*=\s*L"[^"]*";', 'PCWSTR hardwareIds = L"PadDisplay\0\0";')
+$app = [regex]::Replace($app, 'PCWSTR compatibleIds\s*=\s*L"[^"]*";', 'PCWSTR compatibleIds = L"PadDisplay\0\0";')
 $app = $app.Replace('L"IddSampleDriver"', 'L"PadDisplay"')
 $app = $app.Replace('SwDeviceCreate(L"IddSampleDriver"', 'SwDeviceCreate(L"PadDisplay"')
 Set-Content (Join-Path $appOut "main.cpp") $app -Encoding UTF8
