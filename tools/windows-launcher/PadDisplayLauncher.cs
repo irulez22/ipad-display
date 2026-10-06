@@ -19,7 +19,6 @@ class PadDisplayLauncher : Form
     Button save = new Button();
     TextBox log = new TextBox();
     Label status = new Label();
-    Process engine;
     NotifyIcon tray;
     const string RegPath = @"Software\PadDisplay";
     const string Engine = @"\\wsl$\Ubuntu\home\josh\ipad-display\tools\launch_windows.ps1";
@@ -160,44 +159,95 @@ class PadDisplayLauncher : Form
 
     void ApplyStartup()
     {
-        string exe=Application.ExecutablePath;
-        string args=startup.Checked
-            ? "/Create /TN \"PadDisplay\" /SC ONLOGON /TR \"\\\""+exe+"\\\" --autostart\" /RL HIGHEST /F"
-            : "/Delete /TN \"PadDisplay\" /F";
-        try {
-            var p=Process.Start(new ProcessStartInfo("schtasks.exe",args){UseShellExecute=false,CreateNoWindow=true});
-            p.WaitForExit();
-        } catch(Exception ex){Append("Startup task: "+ex.Message);}
+        try
+        {
+            using(var k=Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
+            {
+                if(startup.Checked)
+                    k.SetValue("PadDisplay", "\"" + Application.ExecutablePath + "\" --autostart");
+                else
+                    k.DeleteValue("PadDisplay", false);
+            }
+        }
+        catch(Exception ex){Append("Startup registration: "+ex.Message);}
+    }
+
+    bool EngineTaskExists()
+    {
+        try
+        {
+            var psi=new ProcessStartInfo("schtasks.exe","/Query /TN \"" + TaskName + "\"");
+            psi.UseShellExecute=false; psi.CreateNoWindow=true;
+            var p=Process.Start(psi); p.WaitForExit();
+            return p.ExitCode==0;
+        }
+        catch { return false; }
+    }
+
+    bool EnsureEngineTask()
+    {
+        if(EngineTaskExists()) return true;
+        if(!File.Exists(TaskSetup))
+        {
+            MessageBox.Show("Engine task installer not found:\r\n"+TaskSetup);
+            return false;
+        }
+
+        var answer=MessageBox.Show(
+            "PadDisplay needs one administrator approval to install its privileged streaming engine.\r\n\r\nAfter this, starting PadDisplay will not ask for UAC again.",
+            "PadDisplay setup", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
+        if(answer!=DialogResult.OK) return false;
+
+        try
+        {
+            var psi=new ProcessStartInfo("powershell.exe",
+                "-NoProfile -ExecutionPolicy Bypass -File \"" + TaskSetup + "\"");
+            psi.UseShellExecute=true; psi.Verb="runas";
+            var p=Process.Start(psi); p.WaitForExit();
+            return p.ExitCode==0 && EngineTaskExists();
+        }
+        catch(Exception ex)
+        {
+            Append("Engine setup: "+ex.Message);
+            return false;
+        }
     }
 
     void StartEngine()
     {
-        if(engine!=null && !engine.HasExited) return;
         SaveSettings();
-        if(!File.Exists(Engine)){MessageBox.Show("Engine not found:\r\n"+Engine);return;}
-        string args="-NoProfile -ExecutionPolicy Bypass -File \""+Engine+"\" -NonInteractive"+
-            " -DisplayIndex "+display.SelectedIndex+
-            " -Resolution \""+Convert.ToString(resolution.SelectedItem)+"\""+
-            " -Fps "+Convert.ToString(fps.SelectedItem)+
-            " -Bitrate \""+bitrate.Text.Trim()+"\"";
-        var psi=new ProcessStartInfo("powershell.exe",args);
-        psi.UseShellExecute=false; psi.CreateNoWindow=true;
-        psi.RedirectStandardOutput=true; psi.RedirectStandardError=true;
-        engine=new Process(); engine.StartInfo=psi; engine.EnableRaisingEvents=true;
-        engine.OutputDataReceived += delegate(object s,DataReceivedEventArgs e){if(e.Data!=null)Append(e.Data);};
-        engine.ErrorDataReceived += delegate(object s,DataReceivedEventArgs e){if(e.Data!=null)Append("ERR: "+e.Data);};
-        engine.Exited += delegate { BeginInvoke((Action)delegate {status.Text="Stopped";start.Enabled=true;stop.Enabled=false;}); };
-        engine.Start(); engine.BeginOutputReadLine(); engine.BeginErrorReadLine();
-        status.Text="Running"; start.Enabled=false; stop.Enabled=true; Append("Starting PadDisplay...");
+        if(!EnsureEngineTask()) return;
+        try
+        {
+            var p=Process.Start(new ProcessStartInfo("schtasks.exe",
+                "/Run /TN \"" + TaskName + "\""){UseShellExecute=false,CreateNoWindow=true});
+            p.WaitForExit();
+            if(p.ExitCode!=0) throw new Exception("Task Scheduler returned "+p.ExitCode);
+            status.Text="Running";
+            start.Enabled=false;
+            stop.Enabled=true;
+            Append("PadDisplay engine started without UAC.");
+        }
+        catch(Exception ex)
+        {
+            Append("Start failed: "+ex.Message);
+            status.Text="Stopped";
+        }
     }
 
     void StopEngine()
     {
-        try {
-            if(engine!=null && !engine.HasExited)
-                Process.Start(new ProcessStartInfo("taskkill.exe","/PID "+engine.Id+" /T /F"){UseShellExecute=false,CreateNoWindow=true}).WaitForExit();
-        } catch {}
-        status.Text="Stopped"; start.Enabled=true; stop.Enabled=false;
+        try
+        {
+            var p=Process.Start(new ProcessStartInfo("schtasks.exe",
+                "/End /TN \"" + TaskName + "\""){UseShellExecute=false,CreateNoWindow=true});
+            p.WaitForExit();
+        }
+        catch {}
+        status.Text="Stopped";
+        start.Enabled=true;
+        stop.Enabled=false;
+        Append("PadDisplay engine stopped.");
     }
 
     void Append(string text)
