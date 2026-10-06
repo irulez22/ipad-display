@@ -60,8 +60,8 @@ while [ "$i" -lt 45 ]; do
     fi
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') launch attempt $((i + 1))" >> "$LOG"
-    su mobile -c "/usr/bin/uiopen --bundleid com.ipaddisplay.client" >> "$LOG" 2>&1 || \
-        /usr/bin/uiopen --bundleid com.ipaddisplay.client >> "$LOG" 2>&1 || true
+    su mobile -c "/usr/bin/uiopen paddisplay://" >> "$LOG" 2>&1 || \
+        /usr/bin/uiopen paddisplay:// >> "$LOG" 2>&1 || true
 
     sleep 2
     if ps ax 2>/dev/null | grep -v grep | grep -q "[P]adDisplay"; then
