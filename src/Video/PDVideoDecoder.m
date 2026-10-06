@@ -1,4 +1,5 @@
 #import "PDVideoDecoder.h"
+#import "PDLog.h"
 #import <CoreMedia/CoreMedia.h>
 #import <VideoToolbox/VideoToolbox.h>
 
@@ -19,9 +20,9 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
 @implementation PDVideoDecoder
 - (instancetype)initWithDisplayLayer:(AVSampleBufferDisplayLayer*)l { if((self=[super init])) { _displayLayer=l; _accessUnit=[NSMutableData data]; _presentationSlots=dispatch_semaphore_create(3); } return self; }
 - (void)dealloc { [self destroySession]; if(_formatDescription) CFRelease(_formatDescription); }
-- (void)report:(NSString*)s { id<PDVideoDecoderDelegate>d=self.delegate; if(d)[d videoDecoder:self didUpdateStatus:s]; NSLog(@"PadDisplay decoder: %@",s); }
-- (void)destroySession { if(self.session){ VTDecompressionSessionWaitForAsynchronousFrames(self.session); VTDecompressionSessionInvalidate(self.session); CFRelease(self.session); self.session=NULL; } }
-- (void)reset { [self.accessUnit setLength:0]; [self destroySession]; self.sps=nil; self.pps=nil; self.frameCount=0; self.errorCount=0; if(self.formatDescription){CFRelease(self.formatDescription);self.formatDescription=NULL;} dispatch_async(dispatch_get_main_queue(), ^{[self.displayLayer flushAndRemoveImage];}); }
+- (void)report:(NSString*)s { id<PDVideoDecoderDelegate>d=self.delegate; if(d)[d videoDecoder:self didUpdateStatus:s]; PDLog(@"Decoder: %@",s); }
+- (void)destroySession { if(self.session){ PDLog(@"Decoder destroying session frames=%lu errors=%lu",(unsigned long)self.frameCount,(unsigned long)self.errorCount); VTDecompressionSessionWaitForAsynchronousFrames(self.session); VTDecompressionSessionInvalidate(self.session); CFRelease(self.session); self.session=NULL; } }
+- (void)reset { PDLog(@"Decoder reset"); [self.accessUnit setLength:0]; [self destroySession]; self.sps=nil; self.pps=nil; self.frameCount=0; self.errorCount=0; if(self.formatDescription){CFRelease(self.formatDescription);self.formatDescription=NULL;} dispatch_async(dispatch_get_main_queue(), ^{[self.displayLayer flushAndRemoveImage];}); }
 
 - (void)ensureSession {
     if(self.session || !self.sps || !self.pps) return;
@@ -32,7 +33,7 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
     VTDecompressionOutputCallbackRecord cb={PDDecompressionCallback,(__bridge void*)self};
     NSDictionary*attrs=@{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),(id)kCVPixelBufferIOSurfacePropertiesKey:@{}};
     s=VTDecompressionSessionCreate(kCFAllocatorDefault,self.formatDescription,NULL,(__bridge CFDictionaryRef)attrs,&cb,&_session);
-    if(s==noErr && self.session)[self report:@"Decoder ready (VideoToolbox)"];
+    if(s==noErr && self.session){ PDLog(@"Decoder session created"); [self report:@"Decoder ready (VideoToolbox)"]; }
     else [self report:[NSString stringWithFormat:@"VideoToolbox session error: %d",(int)s]];
 }
 - (void)appendAVCCNAL:(NSData*)nal { uint32_t n=CFSwapInt32HostToBig((uint32_t)nal.length); [self.accessUnit appendBytes:&n length:4]; [self.accessUnit appendData:nal]; }
