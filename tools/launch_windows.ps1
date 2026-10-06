@@ -9,6 +9,9 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 $ipadIp = "192.168.68.51"
 $repo = "\\wsl$\Ubuntu\home\josh\ipad-display"
 $streamer = "$repo\tools\stream_windows.py"
+$wasapiSource = "$repo\tools\wasapi_loopback.cpp"
+$audioBuildDir = Join-Path $env:LOCALAPPDATA "PadDisplay"
+$wasapiExe = Join-Path $audioBuildDir "wasapi_loopback.exe"
 $ffmpeg = "C:\Users\Josh\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.2-full_build\bin\ffmpeg.exe"
 Set-Location $env:USERPROFILE
 Add-Type -AssemblyName System.Windows.Forms
@@ -73,6 +76,29 @@ function Start-UsbProxy {
   if ($p -and -not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
   return $null
 }
+function Ensure-WasapiHelper {
+  if (-not (Test-Path $wasapiSource)) { throw "WASAPI helper source not found at $wasapiSource." }
+  New-Item -ItemType Directory -Force -Path $audioBuildDir | Out-Null
+  $needBuild = -not (Test-Path $wasapiExe)
+  if (-not $needBuild) {
+    $needBuild = (Get-Item $wasapiSource).LastWriteTimeUtc -gt (Get-Item $wasapiExe).LastWriteTimeUtc
+  }
+  if (-not $needBuild) { return $wasapiExe }
+
+  $vsDev = "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
+  if (-not (Test-Path $vsDev)) { throw "Visual Studio VsDevCmd.bat not found; cannot build WASAPI helper." }
+
+  $localSource = Join-Path $audioBuildDir "wasapi_loopback.cpp"
+  Copy-Item $wasapiSource $localSource -Force
+  Write-Host "Building WASAPI loopback helper..." -ForegroundColor Cyan
+  $cmd = ('call "{0}" -arch=x64 -host_arch=x64 >nul && cl /nologo /EHsc /O2 "{1}" /Fe:"{2}" ole32.lib' -f $vsDev,$localSource,$wasapiExe)
+  & cmd.exe /c $cmd
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path $wasapiExe)) {
+    throw "Failed to build WASAPI loopback helper."
+  }
+  return $wasapiExe
+}
+
 function Register-UsbDeviceEvents {
   Unregister-Event -SourceIdentifier "PadDisplay.DeviceChange" -ErrorAction SilentlyContinue
   Register-WmiEvent -Class Win32_DeviceChangeEvent -SourceIdentifier "PadDisplay.DeviceChange" | Out-Null
@@ -232,6 +258,8 @@ while ($true) {
     $targetHost = $ipadIp
     $targetPort = 4822
     Write-Host "Transport: Wi-Fi fallback ($ipadIp)" -ForegroundColor Cyan
+    $audioHelper = Ensure-WasapiHelper
+    Write-Host "Audio: Wi-Fi mirror enabled" -ForegroundColor Cyan
   }
 
   $streamArgs = @(
@@ -249,6 +277,9 @@ while ($true) {
     "--touch-width", [string]$mode.W,
     "--touch-height", [string]$mode.H
   )
+  if (-not $usingUsb) {
+    $streamArgs += @("--audio-loopback", "`"$audioHelper`"")
+  }
   $streamProc = Start-Process -FilePath $pythonExe -ArgumentList $streamArgs -NoNewWindow -PassThru
   $switchToUsb = $false
 
