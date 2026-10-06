@@ -394,7 +394,7 @@ def audio_loop(sock, helper_path, send_lock):
         proc = subprocess.Popen(
             [helper_path],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=None,
             bufsize=0,
         )
     except Exception as exc:
