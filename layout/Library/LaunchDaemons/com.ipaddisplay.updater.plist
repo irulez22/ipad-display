@@ -12,6 +12,10 @@
     <true/>
     <key>StartInterval</key>
     <integer>21600</integer>
+    <key>WatchPaths</key>
+    <array>
+        <string>/var/mobile/Library/PadDisplayUpdater/check-now</string>
+    </array>
     <key>LowPriorityIO</key>
     <true/>
 </dict>
