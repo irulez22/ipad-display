@@ -71,7 +71,7 @@ if [ "${PADDISPLAY_NO_DESKTOP:-0}" != "1" ]; then
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\josh\ipad-display\tools\build_windows_launcher.ps1"
 
   echo "==> Restarting PadDisplay desktop launcher..."
-  cmd.exe /c "taskkill /IM PadDisplayLauncher.exe /F >nul 2>&1"
+  cmd.exe /c "taskkill /IM PadDisplayLauncher.exe /F >nul 2>&1" || true
   cmd.exe /c "start \"\" \"%LOCALAPPDATA%\PadDisplay\PadDisplayLauncher.exe\""
 else
   echo
