@@ -2,6 +2,7 @@
 #import "PDStreamReceiver.h"
 #import "PDH264Parser.h"
 #import "PDVideoDecoder.h"
+#import "PDLog.h"
 #import <AVFoundation/AVFoundation.h>
 
 static const uint8_t PD_PACKET_TOUCH_V2 = 0x11;
@@ -52,6 +53,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 
     self.receiver = [[PDStreamReceiver alloc] initWithPort:4822];
     self.receiver.delegate = self;
+    PDLog(@"DisplayViewController ready; starting receiver");
     [self.receiver start];
 }
 
@@ -68,6 +70,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 
 - (void)streamReceiverDidConnect:(PDStreamReceiver *)receiver
 {
+    PDLog(@"Receiver connected");
     self.videoReady = NO;
     dispatch_async(dispatch_get_main_queue(), ^{
         self.statusLabel.hidden = NO;
@@ -77,6 +80,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 
 - (void)streamReceiverDidDisconnect:(PDStreamReceiver *)receiver error:(NSError *)error
 {
+    PDLog(@"Receiver disconnected error=%@", error);
     self.videoReady = NO;
     [self.touchIDs removeAllObjects];
     [self.parser flush];
@@ -94,6 +98,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
     if (type == 0x01) {
         [self.parser appendData:payload];
     } else if (type == 0x04) {
+        PDLog(@"Host requested disconnect");
         [self.parser flush];
         [self.decoder flush];
         [receiver disconnectClient];
