@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 
 VIDEO_H264 = 0x01
 DISCONNECT = 0x04
@@ -38,6 +39,54 @@ PD_TOUCH_DOWN = 0
 PD_TOUCH_MOVE = 1
 PD_TOUCH_UP = 2
 PD_TOUCH_CANCEL = 3
+
+
+
+class StreamStats:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.video_bytes = 0
+        self.audio_bytes = 0
+        self.touch_packets = 0
+        self.started = time.monotonic()
+
+    def add_video(self, count):
+        with self.lock:
+            self.video_bytes += count
+
+    def add_audio(self, count):
+        with self.lock:
+            self.audio_bytes += count
+
+    def add_touch(self):
+        with self.lock:
+            self.touch_packets += 1
+
+    def snapshot(self):
+        with self.lock:
+            return (
+                self.video_bytes,
+                self.audio_bytes,
+                self.touch_packets,
+                self.started,
+            )
+
+
+def status_loop(stats, stop_event):
+    last_video = 0
+    last_audio = 0
+    while not stop_event.wait(1.0):
+        video, audio, touches, started = stats.snapshot()
+        video_mbps = (video - last_video) * 8.0 / 1000000.0
+        audio_kbps = (audio - last_audio) * 8.0 / 1000.0
+        elapsed = int(time.monotonic() - started)
+        print(
+            "Status: %ds | video %.2f Mbps | audio %.0f kbps | touch packets %d"
+            % (elapsed, video_mbps, audio_kbps, touches),
+            flush=True,
+        )
+        last_video = video
+        last_audio = audio
 
 
 class POINTER_INFO(ctypes.Structure):
@@ -342,7 +391,7 @@ def parse_touch_v2(payload):
     return contacts
 
 
-def input_loop(sock, monitor_rect):
+def input_loop(sock, monitor_rect, stats=None):
     if monitor_rect is None:
         print("Touch: matching stream monitor not found; touch input disabled.")
         return
@@ -377,18 +426,22 @@ def input_loop(sock, monitor_rect):
                         print("Touch: received first TOUCH_V2 packet from iPad (%d contact(s))." % len(contacts))
                         saw_touch = True
                     injector.inject(contacts)
+                    if stats is not None:
+                        stats.add_touch()
             elif packet_type == TOUCH_V1 and len(payload) == 5:
                 phase = payload[0]
                 x = struct.unpack(">H", payload[1:3])[0] / 65535.0
                 y = struct.unpack(">H", payload[3:5])[0] / 65535.0
                 injector.inject([(0, phase, x, y)])
+                if stats is not None:
+                    stats.add_touch()
     except (OSError, RuntimeError):
         return
     except Exception as exc:
         print("Touch injection error: %s" % exc)
 
 
-def audio_loop(sock, helper_path, send_lock):
+def audio_loop(sock, helper_path, send_lock, stats=None):
     print("Audio: Wi-Fi mirror enabled (48 kHz stereo PCM).")
     try:
         proc = subprocess.Popen(
@@ -417,12 +470,16 @@ def audio_loop(sock, helper_path, send_lock):
 
             while len(pending) >= chunk:
                 send_packet(sock, AUDIO_PCM, bytes(pending[:chunk]), send_lock)
+                if stats is not None:
+                    stats.add_audio(chunk)
                 del pending[:chunk]
 
         # Send any final complete PCM frames without losing alignment.
         usable = len(pending) - (len(pending) % 4)
         if usable:
             send_packet(sock, AUDIO_PCM, bytes(pending[:usable]), send_lock)
+            if stats is not None:
+                stats.add_audio(usable)
     except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
         pass
     finally:
@@ -605,9 +662,18 @@ def main():
             )
         else:
             monitor_rect = find_touch_monitor(width_i, height_i)
+        stats = StreamStats()
+        stop_status = threading.Event()
+        status_thread = threading.Thread(
+            target=status_loop,
+            args=(stats, stop_status),
+            daemon=True,
+        )
+        status_thread.start()
+
         touch_thread = threading.Thread(
             target=input_loop,
-            args=(sock, monitor_rect),
+            args=(sock, monitor_rect, stats),
             daemon=True,
         )
         touch_thread.start()
@@ -617,7 +683,7 @@ def main():
         if args.audio_loopback:
             audio_thread = threading.Thread(
                 target=audio_loop,
-                args=(sock, args.audio_loopback, send_lock),
+                args=(sock, args.audio_loopback, send_lock, stats),
                 daemon=True,
             )
             audio_thread.start()
@@ -632,6 +698,7 @@ def main():
                 if not data:
                     break
                 send_packet(sock, VIDEO_H264, data, send_lock)
+                stats.add_video(len(data))
         except KeyboardInterrupt:
             print("\nStopping...")
             interrupted = True
@@ -641,6 +708,7 @@ def main():
         else:
             interrupted = False
         finally:
+            stop_status.set()
             if proc.poll() is None:
                 proc.terminate()
             try:
