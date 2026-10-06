@@ -2,6 +2,7 @@
 #import "PDLog.h"
 #import <CoreMedia/CoreMedia.h>
 #import <VideoToolbox/VideoToolbox.h>
+#import <unistd.h>
 
 @interface PDVideoDecoder ()
 @property(nonatomic,weak) AVSampleBufferDisplayLayer*displayLayer;
@@ -13,12 +14,13 @@
 @property(nonatomic) NSUInteger frameCount;
 @property(nonatomic) NSUInteger errorCount;
 @property(nonatomic) dispatch_semaphore_t presentationSlots;
+@property(nonatomic,strong) dispatch_queue_t presentationQueue;
 @end
 
 static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSStatus status, VTDecodeInfoFlags infoFlags, CVImageBufferRef imageBuffer, CMTime pts, CMTime duration);
 
 @implementation PDVideoDecoder
-- (instancetype)initWithDisplayLayer:(AVSampleBufferDisplayLayer*)l { if((self=[super init])) { _displayLayer=l; _accessUnit=[NSMutableData data]; _presentationSlots=dispatch_semaphore_create(3); } return self; }
+- (instancetype)initWithDisplayLayer:(AVSampleBufferDisplayLayer*)l { if((self=[super init])) { _displayLayer=l; _accessUnit=[NSMutableData data]; _presentationSlots=dispatch_semaphore_create(3); _presentationQueue=dispatch_queue_create("com.ipaddisplay.presentation", DISPATCH_QUEUE_SERIAL); } return self; }
 - (void)dealloc { [self destroySession]; if(_formatDescription) CFRelease(_formatDescription); }
 - (void)report:(NSString*)s { id<PDVideoDecoderDelegate>d=self.delegate; if(d)[d videoDecoder:self didUpdateStatus:s]; PDLog(@"Decoder: %@",s); }
 - (void)destroySession { if(self.session){ PDLog(@"Decoder destroying session frames=%lu errors=%lu",(unsigned long)self.frameCount,(unsigned long)self.errorCount); VTDecompressionSessionWaitForAsynchronousFrames(self.session); VTDecompressionSessionInvalidate(self.session); CFRelease(self.session); self.session=NULL; } }
@@ -65,18 +67,45 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
 - (void)presentImageBuffer:(CVImageBufferRef)imageBuffer status:(OSStatus)status {
     if(status!=noErr || !imageBuffer){self.errorCount++;[self report:[NSString stringWithFormat:@"Frame error %d (%lu total)",(int)status,(unsigned long)self.errorCount]];return;}
 
-    // Preserve every frame, but cap the number of retained decoded frames waiting
-    // for the main thread. This applies backpressure to VideoToolbox instead of
-    // allowing an unbounded 2048x1536 frame backlog to exhaust iPad memory.
+    // Preserve every frame while applying backpressure at the actual display-layer
+    // boundary. Only three decoded frames may be retained ahead of presentation.
     dispatch_semaphore_wait(self.presentationSlots, DISPATCH_TIME_FOREVER);
 
     CFRetain(imageBuffer); self.frameCount++;
     if(self.frameCount==1 || self.frameCount%120==0){size_t w=CVPixelBufferGetWidth(imageBuffer),h=CVPixelBufferGetHeight(imageBuffer);[self report:[NSString stringWithFormat:@"VideoToolbox OK - %lux%lu - frames %lu",(unsigned long)w,(unsigned long)h,(unsigned long)self.frameCount]];}
-    dispatch_async(dispatch_get_main_queue(), ^{
-        CMVideoFormatDescriptionRef fd=NULL; CMSampleBufferRef sb=NULL;
+
+    dispatch_async(self.presentationQueue, ^{
+        CMVideoFormatDescriptionRef fd=NULL;
+        CMSampleBufferRef sb=NULL;
         OSStatus e=CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,imageBuffer,&fd);
-        if(e==noErr && fd){CMSampleTimingInfo ti={kCMTimeInvalid,kCMTimeInvalid,kCMTimeInvalid};e=CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,imageBuffer,YES,NULL,NULL,fd,&ti,&sb);}
-        if(e==noErr && sb){CFArrayRef aa=CMSampleBufferGetSampleAttachmentsArray(sb,YES);if(aa&&CFArrayGetCount(aa)){CFMutableDictionaryRef a=(CFMutableDictionaryRef)CFArrayGetValueAtIndex(aa,0);CFDictionarySetValue(a,kCMSampleAttachmentKey_DisplayImmediately,kCFBooleanTrue);}[self.displayLayer enqueueSampleBuffer:sb];}
+        if(e==noErr && fd){
+            CMSampleTimingInfo ti={kCMTimeInvalid,kCMTimeInvalid,kCMTimeInvalid};
+            e=CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,imageBuffer,YES,NULL,NULL,fd,&ti,&sb);
+        }
+
+        if(e==noErr && sb){
+            CFArrayRef aa=CMSampleBufferGetSampleAttachmentsArray(sb,YES);
+            if(aa&&CFArrayGetCount(aa)){
+                CFMutableDictionaryRef a=(CFMutableDictionaryRef)CFArrayGetValueAtIndex(aa,0);
+                CFDictionarySetValue(a,kCMSampleAttachmentKey_DisplayImmediately,kCFBooleanTrue);
+            }
+
+            NSUInteger waits=0;
+            while(!self.displayLayer.readyForMoreMediaData){
+                usleep(1000);
+                waits++;
+                if(waits==50 || waits==250 || waits==1000){
+                    PDLog(@"Display backpressure waiting=%lums",(unsigned long)waits);
+                }
+            }
+
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                [self.displayLayer enqueueSampleBuffer:sb];
+            });
+        } else {
+            PDLog(@"SampleBuffer creation failed status=%d",(int)e);
+        }
+
         if(sb)CFRelease(sb);
         if(fd)CFRelease(fd);
         CFRelease(imageBuffer);
