@@ -20,7 +20,7 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   exit 0
 fi
 trap 'rm -rf "$LOCK" "$TMP"' EXIT HUP INT TERM
-rm -f "$STATE/check-now" 2>/dev/null || true
+rm -f /var/mobile/Library/PadDisplayUpdateNow 2>/dev/null || true
 rm -rf "$TMP"
 mkdir -p "$TMP"
 
