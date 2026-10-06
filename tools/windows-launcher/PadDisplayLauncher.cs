@@ -21,7 +21,8 @@ class PadDisplayLauncher : Form
     Label status = new Label();
     NotifyIcon tray;
     const string RegPath = @"Software\PadDisplay";
-    const string Engine = @"\\wsl$\Ubuntu\home\josh\ipad-display\tools\launch_windows.ps1";
+    const string TaskName = "PadDisplay Engine";
+    const string TaskSetup = @"\\wsl$\Ubuntu\home\josh\ipad-display\tools\install_windows_engine_task.ps1";
 
     [STAThread]
     static void Main(string[] args)
