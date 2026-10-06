@@ -17,6 +17,7 @@ AUDIO_PCM = 0x20
 TOUCH_V1 = 0x10
 TOUCH_V2 = 0x11
 PORT = 4822
+AUDIO_PORT = 4824
 MAX_TOUCH_CONTACTS = 10
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
@@ -441,8 +442,17 @@ def input_loop(sock, monitor_rect, stats=None):
         print("Touch injection error: %s" % exc)
 
 
-def audio_loop(sock, helper_path, send_lock, stats=None):
-    print("Audio: Wi-Fi mirror enabled (48 kHz stereo PCM).")
+def audio_loop(host, port, helper_path, stats=None):
+    print("Audio: connecting dedicated stream to %s:%d..." % (host, port))
+    try:
+        audio_sock = socket.create_connection((host, port), timeout=5)
+        audio_sock.settimeout(None)
+        audio_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError, TimeoutError, OSError) as exc:
+        print("Audio: dedicated connection failed: %s" % exc)
+        return
+
+    print("Audio: Wi-Fi mirror enabled on dedicated TCP stream (48 kHz stereo PCM).")
     try:
         proc = subprocess.Popen(
             [helper_path],
@@ -469,7 +479,7 @@ def audio_loop(sock, helper_path, send_lock, stats=None):
             pending.extend(data)
 
             while len(pending) >= chunk:
-                send_packet(sock, AUDIO_PCM, bytes(pending[:chunk]), send_lock)
+                send_packet(audio_sock, AUDIO_PCM, bytes(pending[:chunk]))
                 if stats is not None:
                     stats.add_audio(chunk)
                 del pending[:chunk]
@@ -477,12 +487,20 @@ def audio_loop(sock, helper_path, send_lock, stats=None):
         # Send any final complete PCM frames without losing alignment.
         usable = len(pending) - (len(pending) % 4)
         if usable:
-            send_packet(sock, AUDIO_PCM, bytes(pending[:usable]), send_lock)
+            send_packet(audio_sock, AUDIO_PCM, bytes(pending[:usable]))
             if stats is not None:
                 stats.add_audio(usable)
     except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
         pass
     finally:
+        try:
+            send_packet(audio_sock, DISCONNECT)
+        except OSError:
+            pass
+        try:
+            audio_sock.close()
+        except OSError:
+            pass
         if proc.poll() is None:
             proc.terminate()
         try:
@@ -510,6 +528,7 @@ def main():
     p.add_argument("--touch-width", type=int, default=None)
     p.add_argument("--touch-height", type=int, default=None)
     p.add_argument("--audio-loopback", default=None, help="WASAPI loopback helper executable; enables mirrored audio")
+    p.add_argument("--audio-port", type=int, default=AUDIO_PORT, help="Dedicated Wi-Fi audio TCP port")
     args = p.parse_args()
 
     if shutil.which(args.ffmpeg) is None and args.ffmpeg == "ffmpeg":
@@ -683,7 +702,7 @@ def main():
         if args.audio_loopback:
             audio_thread = threading.Thread(
                 target=audio_loop,
-                args=(sock, args.audio_loopback, send_lock, stats),
+                args=(args.host, args.audio_port, args.audio_loopback, stats),
                 daemon=True,
             )
             audio_thread.start()
