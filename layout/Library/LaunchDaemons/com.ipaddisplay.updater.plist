@@ -14,7 +14,7 @@
     <integer>21600</integer>
     <key>WatchPaths</key>
     <array>
-        <string>/var/mobile/Library/PadDisplayUpdater/check-now</string>
+        <string>/var/mobile/Library/PadDisplayUpdateNow</string>
     </array>
     <key>LowPriorityIO</key>
     <true/>
