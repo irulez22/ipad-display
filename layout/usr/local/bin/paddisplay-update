@@ -24,13 +24,30 @@ rm -f "$STATE/check-now" 2>/dev/null || true
 rm -rf "$TMP"
 mkdir -p "$TMP"
 
-if ! command -v curl >/dev/null 2>&1; then
-  log "curl not installed; skipping update check"
+FETCH=""
+if command -v curl >/dev/null 2>&1; then
+  FETCH="curl"
+elif command -v wget >/dev/null 2>&1; then
+  FETCH="wget"
+else
+  log "neither curl nor wget is installed; skipping update check"
   exit 0
 fi
 
+fetch_to() {
+  url="$1"
+  out="$2"
+  if [ "$FETCH" = "curl" ]; then
+    curl -LfsS --connect-timeout 15 --max-time 120 \
+      -H "User-Agent: PadDisplay-iOS10-Updater" \
+      "$url" -o "$out"
+  else
+    wget -q -T 120 -O "$out" "$url"
+  fi
+}
+
 JSON="$TMP/latest.json"
-if ! curl -LfsS --connect-timeout 15 --max-time 45     -H "Accept: application/vnd.github+json"     -H "User-Agent: PadDisplay-iOS10-Updater"     "$API" -o "$JSON"; then
+if ! fetch_to "$API" "$JSON"; then
   log "GitHub release check failed"
   exit 0
 fi
@@ -46,11 +63,11 @@ fi
 DEB="$TMP/PadDisplay.deb"
 SHA="$TMP/PadDisplay.deb.sha256"
 
-if ! curl -LfsS --connect-timeout 15 --max-time 120 "$DEB_URL" -o "$DEB"; then
+if ! fetch_to "$DEB_URL" "$DEB"; then
   log "failed to download deb"
   exit 0
 fi
-if ! curl -LfsS --connect-timeout 15 --max-time 45 "$SHA_URL" -o "$SHA"; then
+if ! fetch_to "$SHA_URL" "$SHA"; then
   log "failed to download sha256"
   exit 0
 fi
