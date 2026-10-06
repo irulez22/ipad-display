@@ -7,7 +7,9 @@
 #import <AVFoundation/AVFoundation.h>
 
 static const uint8_t PD_PACKET_TOUCH_V2 = 0x11;
+static const uint8_t PD_PACKET_CONFIG = 0x03;
 static const uint8_t PD_PACKET_AUDIO_PCM = 0x20;
+static const uint8_t PD_PACKET_AUDIO_PCM_V2 = 0x21;
 static const uint8_t PD_TOUCH_DOWN = 0;
 static const uint8_t PD_TOUCH_MOVE = 1;
 static const uint8_t PD_TOUCH_UP = 2;
@@ -78,12 +80,22 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 
 - (void)streamReceiverDidConnect:(PDStreamReceiver *)receiver
 {
+    NSDictionary *hello = @{
+        @"protocol": @1,
+        @"app": @"0.6.7",
+        @"build": @22,
+        @"audio_pcm_v2": @YES,
+        @"audio_port": @4824
+    };
+    NSData *helloData = [NSJSONSerialization dataWithJSONObject:hello options:0 error:nil];
+    if (helloData) [receiver sendPacketType:PD_PACKET_CONFIG payload:helloData];
+
     if (receiver == self.audioReceiver) {
-        PDLog(@"Audio receiver connected");
+        PDLog(@"Audio receiver connected; sent protocol hello");
         return;
     }
 
-    PDLog(@"Video/touch receiver connected");
+    PDLog(@"Video/touch receiver connected; sent protocol hello");
     self.videoReady = NO;
     dispatch_async(dispatch_get_main_queue(), ^{
         self.statusLabel.hidden = NO;
@@ -119,9 +131,30 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 {
     if (type == 0x01) {
         [self.parser appendData:payload];
+    } else if (type == PD_PACKET_CONFIG) {
+        NSString *text = [[NSString alloc] initWithData:payload encoding:NSUTF8StringEncoding];
+        PDLog(@"Host protocol hello: %@", text ?: @"<invalid UTF-8>");
     } else if (type == PD_PACKET_AUDIO_PCM) {
         if (!self.audioPlayer) self.audioPlayer = [[PDAudioPlayer alloc] init];
         [self.audioPlayer enqueuePCM:payload];
+    } else if (type == PD_PACKET_AUDIO_PCM_V2) {
+        if (payload.length >= 12) {
+            const uint8_t *bytes = payload.bytes;
+            uint32_t sequence =
+                ((uint32_t)bytes[0] << 24) |
+                ((uint32_t)bytes[1] << 16) |
+                ((uint32_t)bytes[2] << 8) |
+                (uint32_t)bytes[3];
+            uint64_t timestampUS = 0;
+            for (NSUInteger i = 4; i < 12; i++) {
+                timestampUS = (timestampUS << 8) | bytes[i];
+            }
+            NSData *pcm = [payload subdataWithRange:NSMakeRange(12, payload.length - 12)];
+            if (!self.audioPlayer) self.audioPlayer = [[PDAudioPlayer alloc] init];
+            [self.audioPlayer enqueuePCM:pcm sequence:sequence timestampUS:timestampUS];
+        } else {
+            PDLog(@"AUDIO_PCM_V2 packet too short: %lu bytes", (unsigned long)payload.length);
+        }
     } else if (type == 0x04) {
         PDLog(@"Host requested disconnect");
         [self.parser flush];
