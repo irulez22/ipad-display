@@ -1,6 +1,6 @@
 Package: com.ipaddisplay.client
 Name: PadDisplay
-Version: 0.5.2
+Version: 0.5.3
 Architecture: iphoneos-arm
 Description: Low-latency H.264 second-display client for jailbroken iOS 10.
 Maintainer: iPad Display Project
