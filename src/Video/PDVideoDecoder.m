@@ -23,7 +23,7 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
 - (instancetype)initWithDisplayLayer:(AVSampleBufferDisplayLayer*)l { if((self=[super init])) { _displayLayer=l; _accessUnit=[NSMutableData data]; _presentationSlots=dispatch_semaphore_create(3); _presentationQueue=dispatch_queue_create("com.ipaddisplay.presentation", DISPATCH_QUEUE_SERIAL); } return self; }
 - (void)dealloc { [self destroySession]; if(_formatDescription) CFRelease(_formatDescription); }
 - (void)report:(NSString*)s { id<PDVideoDecoderDelegate>d=self.delegate; if(d)[d videoDecoder:self didUpdateStatus:s]; PDLog(@"Decoder: %@",s); }
-- (void)destroySession { if(self.session){ PDLog(@"Decoder destroying session frames=%lu errors=%lu",(unsigned long)self.frameCount,(unsigned long)self.errorCount); VTDecompressionSessionWaitForAsynchronousFrames(self.session); VTDecompressionSessionInvalidate(self.session); CFRelease(self.session); self.session=NULL; } }
+- (void)destroySession { if(self.session){ PDLog(@"Decoder destroying session frames=%lu errors=%lu",(unsigned long)self.frameCount,(unsigned long)self.errorCount); VTDecompressionSessionInvalidate(self.session); CFRelease(self.session); self.session=NULL; } }
 - (void)reset { PDLog(@"Decoder reset"); [self.accessUnit setLength:0]; [self destroySession]; self.sps=nil; self.pps=nil; self.frameCount=0; self.errorCount=0; if(self.formatDescription){CFRelease(self.formatDescription);self.formatDescription=NULL;} dispatch_async(dispatch_get_main_queue(), ^{[self.displayLayer flushAndRemoveImage];}); }
 
 - (void)ensureSession {
@@ -52,7 +52,7 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
     s=CMSampleBufferCreateReady(kCFAllocatorDefault,b,self.formatDescription,1,0,NULL,1,&size,&sample); CFRelease(b);
     if(s!=noErr || !sample){self.errorCount++;return;}
     VTDecodeInfoFlags outFlags=0;
-    s=VTDecompressionSessionDecodeFrame(self.session,sample,kVTDecodeFrame_EnableAsynchronousDecompression,NULL,&outFlags);
+    s=VTDecompressionSessionDecodeFrame(self.session,sample,0,NULL,&outFlags);
     CFRelease(sample);
     if(s!=noErr){self.errorCount++;[self report:[NSString stringWithFormat:@"Decode error %d (%lu total)",(int)s,(unsigned long)self.errorCount]];}
 }
@@ -63,7 +63,7 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
     if(t==8){self.pps=[nal copy];[self report:@"PPS received"];[self ensureSession];return;}
     if(t==6 || t==1 || t==5){[self appendAVCCNAL:nal];return;}
 }
-- (void)flush { [self decodeAccessUnit]; if(self.session)VTDecompressionSessionWaitForAsynchronousFrames(self.session); }
+- (void)flush { [self decodeAccessUnit]; }
 - (void)presentImageBuffer:(CVImageBufferRef)imageBuffer status:(OSStatus)status {
     if(status!=noErr || !imageBuffer){self.errorCount++;[self report:[NSString stringWithFormat:@"Frame error %d (%lu total)",(int)status,(unsigned long)self.errorCount]];return;}
 
