@@ -78,10 +78,7 @@ if [ "${PADDISPLAY_NO_DESKTOP:-0}" != "1" ]; then
   echo "==> Restarting PadDisplay desktop launcher..."
   (
     cd /mnt/c/Users/Josh
-    powershell.exe -NoProfile -Command '\
-      Stop-Process -Name PadDisplayLauncher -Force -ErrorAction SilentlyContinue; \
-      $exe = Join-Path $env:LOCALAPPDATA "PadDisplay\PadDisplayLauncher.exe"; \
-      if (Test-Path $exe) { Start-Process -FilePath $exe } else { throw "PadDisplay launcher not found: $exe" }'
+    powershell.exe -NoProfile -Command 'Stop-Process -Name PadDisplayLauncher -Force -ErrorAction SilentlyContinue; $exe = Join-Path $env:LOCALAPPDATA "PadDisplay\PadDisplayLauncher.exe"; if (Test-Path $exe) { Start-Process -FilePath $exe } else { throw "PadDisplay launcher not found: $exe" }'
   )
 else
   echo
