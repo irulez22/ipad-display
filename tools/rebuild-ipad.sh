@@ -88,7 +88,7 @@ fi
 if [ "${PADDISPLAY_NO_DEVICE_TRIGGER:-0}" != "1" ]; then
   echo
   echo "==> Triggering immediate iPad update..."
-  ssh ipad 'mkdir -p /var/mobile/Library/PadDisplayUpdater && touch /var/mobile/Library/PadDisplayUpdater/check-now'
+  ssh ipad 'touch /var/mobile/Library/PadDisplayUpdateNow'
   echo "==> iPad updater triggered. It will install v$version if the release is newer."
 else
   echo
