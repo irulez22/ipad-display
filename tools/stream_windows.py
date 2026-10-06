@@ -465,6 +465,8 @@ def main():
             str(args.fps),
             "-bf",
             "0",
+            "-refs",
+            "1",
             "-zerolatency",
             "1",
             "-delay",
@@ -528,7 +530,7 @@ def main():
         )
     )
     if args.encoder == "nvenc":
-        print("NVENC low-latency: rc-lookahead=0, VBV=%s (~1 frame), no frame dropping" % vbv_bufsize)
+        print("NVENC low-latency: rc-lookahead=0, refs=1, VBV=%s (~1 frame), no frame dropping" % vbv_bufsize)
 
     try:
         sock = socket.create_connection((args.host, args.port), timeout=5)
