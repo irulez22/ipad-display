@@ -18,6 +18,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 @property(nonatomic,strong) AVSampleBufferDisplayLayer *displayLayer;
 @property(nonatomic,strong) UILabel *statusLabel;
 @property(nonatomic,strong) PDStreamReceiver *receiver;
+@property(nonatomic,strong) PDStreamReceiver *audioReceiver;
 @property(nonatomic,strong) PDH264Parser *parser;
 @property(nonatomic,strong) PDVideoDecoder *decoder;
 @property(nonatomic,strong) PDAudioPlayer *audioPlayer;
@@ -57,8 +58,11 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 
     self.receiver = [[PDStreamReceiver alloc] initWithPort:4822];
     self.receiver.delegate = self;
-    PDLog(@"DisplayViewController ready; starting receiver");
+    self.audioReceiver = [[PDStreamReceiver alloc] initWithPort:4824];
+    self.audioReceiver.delegate = self;
+    PDLog(@"DisplayViewController ready; starting video/touch receiver 4822 and audio receiver 4824");
     [self.receiver start];
+    [self.audioReceiver start];
 }
 
 - (void)viewDidLayoutSubviews
@@ -74,7 +78,12 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 
 - (void)streamReceiverDidConnect:(PDStreamReceiver *)receiver
 {
-    PDLog(@"Receiver connected");
+    if (receiver == self.audioReceiver) {
+        PDLog(@"Audio receiver connected");
+        return;
+    }
+
+    PDLog(@"Video/touch receiver connected");
     self.videoReady = NO;
     dispatch_async(dispatch_get_main_queue(), ^{
         self.statusLabel.hidden = NO;
@@ -84,7 +93,14 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 
 - (void)streamReceiverDidDisconnect:(PDStreamReceiver *)receiver error:(NSError *)error
 {
-    PDLog(@"Receiver disconnected error=%@", error);
+    if (receiver == self.audioReceiver) {
+        PDLog(@"Audio receiver disconnected error=%@", error);
+        [self.audioPlayer reset];
+        self.audioPlayer = nil;
+        return;
+    }
+
+    PDLog(@"Video/touch receiver disconnected error=%@", error);
     self.videoReady = NO;
     [self.touchIDs removeAllObjects];
     [self.parser flush];
