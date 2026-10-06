@@ -52,8 +52,6 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
     self.decoder = [[PDVideoDecoder alloc] initWithDisplayLayer:self.displayLayer];
     self.decoder.delegate = self;
 
-    self.audioPlayer = [[PDAudioPlayer alloc] init];
-
     self.parser = [[PDH264Parser alloc] init];
     self.parser.delegate = self;
 
@@ -93,6 +91,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
     [self.decoder flush];
     [self.decoder reset];
     [self.audioPlayer reset];
+    self.audioPlayer = nil;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         self.statusLabel.hidden = NO;
@@ -105,6 +104,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
     if (type == 0x01) {
         [self.parser appendData:payload];
     } else if (type == PD_PACKET_AUDIO_PCM) {
+        if (!self.audioPlayer) self.audioPlayer = [[PDAudioPlayer alloc] init];
         [self.audioPlayer enqueuePCM:payload];
     } else if (type == 0x04) {
         PDLog(@"Host requested disconnect");
