@@ -1,6 +1,6 @@
 # PadDisplay protocol v0
 
-The iPad listens on TCP port **4822**.
+The iPad listens on TCP port **4822** for video/touch and **4824** for Wi-Fi audio.
 
 Each frame contains a 4-byte unsigned big-endian payload length, a 1-byte packet type, then exactly payload-length bytes.
 
@@ -12,7 +12,7 @@ Each frame contains a 4-byte unsigned big-endian payload length, a 1-byte packet
 | 0x04 | DISCONNECT | Either | Empty |
 | 0x10 | TOUCH_V1 | iPad -> Windows | Legacy 5-byte packet: phase (u8), normalized X (u16 BE), normalized Y (u16 BE) |
 | 0x11 | TOUCH_V2 | iPad -> Windows | count (u8), then count × 7-byte contacts: id (u16 BE), phase (u8), X (u16 BE), Y (u16 BE) |
-| 0x20 | AUDIO_PCM | Windows -> iPad | 48 kHz, stereo, signed 16-bit little-endian PCM. Used only on Wi-Fi transport. |
+| 0x20 | AUDIO_PCM | Windows -> iPad (TCP 4824) | 48 kHz, stereo, signed 16-bit little-endian PCM. Used only on Wi-Fi transport. |
 
 The parser reconstructs NAL units across network packet boundaries. SPS (NAL 7) and PPS (NAL 8) must precede picture data. Send regular IDR frames.
 
@@ -24,4 +24,4 @@ TOUCH_V1 remains accepted by the Windows host as a single-contact compatibility 
 
 Future protocol revisions may multiplex control, video, reverse input, audio and telemetry over TCP or usbmux.
 
-AUDIO_PCM mirrors the Windows default render endpoint while the Wi-Fi transport is active. USB transport intentionally sends no audio. Packet boundaries do not imply timestamps; the iPad feeds PCM to a low-latency AudioQueue in arrival order.
+AUDIO_PCM mirrors the Windows default render endpoint while the Wi-Fi transport is active. It uses a dedicated TCP connection on port 4824 so H.264 traffic on port 4822 cannot head-of-line block audio. USB transport intentionally sends no audio. Packet boundaries do not imply timestamps; the iPad feeds PCM to a low-latency AudioQueue in arrival order.
