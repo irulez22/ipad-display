@@ -14,6 +14,9 @@ import time
 VIDEO_H264 = 0x01
 DISCONNECT = 0x04
 AUDIO_PCM = 0x20
+AUDIO_PCM_V2 = 0x21
+CONFIG = 0x03
+PROTOCOL_VERSION = 1
 TOUCH_V1 = 0x10
 TOUCH_V2 = 0x11
 PORT = 4822
@@ -50,14 +53,18 @@ class StreamStats:
         self.audio_bytes = 0
         self.touch_packets = 0
         self.started = time.monotonic()
+        self.last_video = None
+        self.last_audio = None
 
     def add_video(self, count):
         with self.lock:
             self.video_bytes += count
+            self.last_video = time.monotonic()
 
     def add_audio(self, count):
         with self.lock:
             self.audio_bytes += count
+            self.last_audio = time.monotonic()
 
     def add_touch(self):
         with self.lock:
@@ -70,20 +77,42 @@ class StreamStats:
                 self.audio_bytes,
                 self.touch_packets,
                 self.started,
+                self.last_video,
+                self.last_audio,
             )
+
+
+def watchdog_loop(stats, proc, stop_event, stall_seconds=5.0):
+    while not stop_event.wait(1.0):
+        _, _, _, started, last_video, _ = stats.snapshot()
+        now = time.monotonic()
+        if last_video is None:
+            if now - started > stall_seconds:
+                print("Watchdog: no video produced for %.1fs; restarting streamer." % stall_seconds, flush=True)
+                if proc.poll() is None:
+                    proc.terminate()
+                return
+        elif now - last_video > stall_seconds:
+            print("Watchdog: video stalled for %.1fs; restarting streamer." % (now - last_video), flush=True)
+            if proc.poll() is None:
+                proc.terminate()
+            return
 
 
 def status_loop(stats, stop_event):
     last_video = 0
     last_audio = 0
     while not stop_event.wait(1.0):
-        video, audio, touches, started = stats.snapshot()
+        video, audio, touches, started, last_video_time, last_audio_time = stats.snapshot()
         video_mbps = (video - last_video) * 8.0 / 1000000.0
         audio_kbps = (audio - last_audio) * 8.0 / 1000.0
         elapsed = int(time.monotonic() - started)
+        now = time.monotonic()
+        video_age = "-" if last_video_time is None else "%.1fs" % (now - last_video_time)
+        audio_age = "-" if last_audio_time is None else "%.1fs" % (now - last_audio_time)
         print(
-            "Status: %ds | video %.2f Mbps | audio %.0f kbps | touch packets %d"
-            % (elapsed, video_mbps, audio_kbps, touches),
+            "Status: %ds | video %.2f Mbps age %s | audio %.0f kbps age %s | touch packets %d"
+            % (elapsed, video_mbps, video_age, audio_kbps, audio_age, touches),
             flush=True,
         )
         last_video = video
@@ -420,7 +449,12 @@ def input_loop(sock, monitor_rect, stats=None):
             if payload is None:
                 return
 
-            if packet_type == TOUCH_V2:
+            if packet_type == CONFIG:
+                try:
+                    print("iPad hello: %s" % payload.decode("utf-8", "replace"), flush=True)
+                except Exception:
+                    pass
+            elif packet_type == TOUCH_V2:
                 contacts = parse_touch_v2(payload)
                 if contacts:
                     if not saw_touch:
@@ -452,7 +486,10 @@ def audio_loop(host, port, helper_path, stats=None):
         print("Audio: dedicated connection failed: %s" % exc)
         return
 
-    print("Audio: Wi-Fi mirror enabled on dedicated TCP stream (48 kHz stereo PCM).")
+    hello = ('{"protocol":%d,"host":"windows","channel":"audio","audio_pcm_v2":true}' %
+             PROTOCOL_VERSION).encode("utf-8")
+    send_packet(audio_sock, CONFIG, hello)
+    print("Audio: Wi-Fi mirror enabled on dedicated TCP stream (48 kHz stereo PCM v2).")
     try:
         proc = subprocess.Popen(
             [helper_path],
@@ -466,6 +503,7 @@ def audio_loop(host, port, helper_path, stats=None):
 
     chunk = 3840  # 20 ms of 48kHz stereo s16le
     pending = bytearray()
+    sequence = 0
     try:
         while True:
             data = proc.stdout.read(chunk)
@@ -479,7 +517,11 @@ def audio_loop(host, port, helper_path, stats=None):
             pending.extend(data)
 
             while len(pending) >= chunk:
-                send_packet(audio_sock, AUDIO_PCM, bytes(pending[:chunk]))
+                pcm = bytes(pending[:chunk])
+                timestamp_us = int(time.monotonic() * 1000000.0)
+                payload = struct.pack(">IQ", sequence & 0xffffffff, timestamp_us) + pcm
+                send_packet(audio_sock, AUDIO_PCM_V2, payload)
+                sequence = (sequence + 1) & 0xffffffff
                 if stats is not None:
                     stats.add_audio(chunk)
                 del pending[:chunk]
@@ -487,7 +529,10 @@ def audio_loop(host, port, helper_path, stats=None):
         # Send any final complete PCM frames without losing alignment.
         usable = len(pending) - (len(pending) % 4)
         if usable:
-            send_packet(audio_sock, AUDIO_PCM, bytes(pending[:usable]))
+            pcm = bytes(pending[:usable])
+            timestamp_us = int(time.monotonic() * 1000000.0)
+            payload = struct.pack(">IQ", sequence & 0xffffffff, timestamp_us) + pcm
+            send_packet(audio_sock, AUDIO_PCM_V2, payload)
             if stats is not None:
                 stats.add_audio(usable)
     except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
@@ -672,6 +717,10 @@ def main():
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
+        hello = ('{"protocol":%d,"host":"windows","audio_pcm_v2":true,"audio_port":%d}' %
+                 (PROTOCOL_VERSION, args.audio_port)).encode("utf-8")
+        send_packet(sock, CONFIG, hello)
+
         if None not in (args.touch_left, args.touch_top, args.touch_width, args.touch_height):
             monitor_rect = (
                 args.touch_left,
@@ -711,6 +760,12 @@ def main():
 
         print("Connected. Starting desktop capture; press Ctrl+C to stop.")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0)
+        watchdog_thread = threading.Thread(
+            target=watchdog_loop,
+            args=(stats, proc, stop_status),
+            daemon=True,
+        )
+        watchdog_thread.start()
         try:
             while True:
                 data = proc.stdout.read(args.chunk)
