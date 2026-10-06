@@ -12,6 +12,7 @@ import threading
 
 VIDEO_H264 = 0x01
 DISCONNECT = 0x04
+AUDIO_PCM = 0x20
 TOUCH_V1 = 0x10
 TOUCH_V2 = 0x11
 PORT = 4822
@@ -105,8 +106,13 @@ def one_frame_vbv(bitrate, fps):
     return "%dk" % max(1, int(round(bits_per_frame / 1000.0)))
 
 
-def send_packet(sock, packet_type, payload=b""):
-    sock.sendall(struct.pack(">IB", len(payload), packet_type) + payload)
+def send_packet(sock, packet_type, payload=b"", lock=None):
+    frame = struct.pack(">IB", len(payload), packet_type) + payload
+    if lock is None:
+        sock.sendall(frame)
+    else:
+        with lock:
+            sock.sendall(frame)
 
 
 def read_exactly(sock, length):
@@ -382,6 +388,41 @@ def input_loop(sock, monitor_rect):
         print("Touch injection error: %s" % exc)
 
 
+def audio_loop(sock, helper_path, send_lock):
+    print("Audio: Wi-Fi mirror enabled (48 kHz stereo PCM).")
+    try:
+        proc = subprocess.Popen(
+            [helper_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
+        )
+    except Exception as exc:
+        print("Audio: could not start WASAPI loopback helper: %s" % exc)
+        return
+
+    chunk = 3840  # 20 ms of 48kHz stereo s16le
+    try:
+        while True:
+            data = proc.stdout.read(chunk)
+            if not data:
+                break
+            # Preserve complete stereo PCM frames.
+            usable = len(data) - (len(data) % 4)
+            if usable:
+                send_packet(sock, AUDIO_PCM, data[:usable], send_lock)
+    except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
+        pass
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
 def main():
     p = argparse.ArgumentParser(description="Stream the Windows desktop to PadDisplay")
     p.add_argument("host", help="iPad IP address or localhost proxy")
@@ -399,6 +440,7 @@ def main():
     p.add_argument("--touch-top", type=int, default=None)
     p.add_argument("--touch-width", type=int, default=None)
     p.add_argument("--touch-height", type=int, default=None)
+    p.add_argument("--audio-loopback", default=None, help="WASAPI loopback helper executable; enables mirrored audio")
     args = p.parse_args()
 
     if shutil.which(args.ffmpeg) is None and args.ffmpeg == "ffmpeg":
@@ -558,6 +600,18 @@ def main():
         )
         touch_thread.start()
 
+        send_lock = threading.Lock()
+        audio_thread = None
+        if args.audio_loopback:
+            audio_thread = threading.Thread(
+                target=audio_loop,
+                args=(sock, args.audio_loopback, send_lock),
+                daemon=True,
+            )
+            audio_thread.start()
+        else:
+            print("Audio: disabled for this transport.")
+
         print("Connected. Starting desktop capture; press Ctrl+C to stop.")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0)
         try:
@@ -565,7 +619,7 @@ def main():
                 data = proc.stdout.read(args.chunk)
                 if not data:
                     break
-                send_packet(sock, VIDEO_H264, data)
+                send_packet(sock, VIDEO_H264, data, send_lock)
         except KeyboardInterrupt:
             print("\nStopping...")
             interrupted = True
@@ -578,7 +632,7 @@ def main():
             if proc.poll() is None:
                 proc.terminate()
             try:
-                send_packet(sock, DISCONNECT)
+                send_packet(sock, DISCONNECT, lock=send_lock)
             except OSError:
                 pass
             try:
