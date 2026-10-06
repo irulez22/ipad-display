@@ -41,16 +41,10 @@ LOG="/var/mobile/Library/PadDisplayKiosk/autolaunch.log"
 mkdir -p /var/mobile/Library/PadDisplayKiosk
 echo "$(date '+%Y-%m-%d %H:%M:%S') helper started" >> "$LOG"
 
-i=0
-while [ "$i" -lt 60 ]; do
-    if ps ax 2>/dev/null | grep -v grep | grep -q "[S]pringBoard"; then
-        break
-    fi
-    i=$((i + 1))
-    sleep 1
-done
-
-sleep 5
+# Let SpringBoard / LaunchServices settle. Do not depend on process detection:
+# on this jailbreak the launch daemon can start before SpringBoard is visible
+# to the helper's process listing.
+sleep 10
 
 i=0
 while [ "$i" -lt 45 ]; do
@@ -60,14 +54,18 @@ while [ "$i" -lt 45 ]; do
     fi
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') launch attempt $((i + 1))" >> "$LOG"
-    su mobile -c "/usr/bin/uiopen paddisplay://" >> "$LOG" 2>&1 || \
-        /usr/bin/uiopen paddisplay:// >> "$LOG" 2>&1 || true
+
+    su mobile -c "/usr/bin/uiopen paddisplay://" >> "$LOG" 2>&1
+    rc=$?
+    echo "$(date '+%Y-%m-%d %H:%M:%S') uiopen rc=$rc" >> "$LOG"
 
     sleep 2
+
     if ps ax 2>/dev/null | grep -v grep | grep -q "[P]adDisplay"; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') PadDisplay launched" >> "$LOG"
         exit 0
     fi
+
     i=$((i + 1))
 done
 
