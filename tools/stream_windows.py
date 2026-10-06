@@ -402,15 +402,27 @@ def audio_loop(sock, helper_path, send_lock):
         return
 
     chunk = 3840  # 20 ms of 48kHz stereo s16le
+    pending = bytearray()
     try:
         while True:
             data = proc.stdout.read(chunk)
             if not data:
                 break
-            # Preserve complete stereo PCM frames.
-            usable = len(data) - (len(data) % 4)
-            if usable:
-                send_packet(sock, AUDIO_PCM, data[:usable], send_lock)
+
+            # Pipe reads are not guaranteed to preserve the helper's write
+            # boundaries. Never discard a partial stereo PCM frame: carrying
+            # those bytes forward is essential or all subsequent samples can
+            # become byte-shifted and sound like static/garbled audio.
+            pending.extend(data)
+
+            while len(pending) >= chunk:
+                send_packet(sock, AUDIO_PCM, bytes(pending[:chunk]), send_lock)
+                del pending[:chunk]
+
+        # Send any final complete PCM frames without losing alignment.
+        usable = len(pending) - (len(pending) % 4)
+        if usable:
+            send_packet(sock, AUDIO_PCM, bytes(pending[:usable]), send_lock)
     except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
         pass
     finally:
