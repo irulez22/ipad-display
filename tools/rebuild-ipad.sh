@@ -24,3 +24,23 @@ make clean package
 echo
 echo "==> Done. Packages:"
 ls -1t packages/*.deb 2>/dev/null | head -n 5 || true
+
+if [ "${PADDISPLAY_NO_PUSH:-0}" != "1" ]; then
+  echo
+  echo "==> Syncing successful build to GitHub..."
+
+  git add -A
+
+  if ! git diff --cached --quiet; then
+    git commit -m "Auto-sync successful PadDisplay build $(date '+%Y-%m-%d %H:%M:%S')"
+  else
+    echo "No new repository changes to commit."
+  fi
+
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+  git push origin "$branch"
+  echo "==> GitHub push complete: origin/$branch"
+else
+  echo
+  echo "==> GitHub auto-push disabled by PADDISPLAY_NO_PUSH=1"
+fi
