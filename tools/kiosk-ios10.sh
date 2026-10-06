@@ -20,6 +20,87 @@ STATE_DIR="/var/mobile/Library/PadDisplayKiosk"
 STATE_FILE="$STATE_DIR/disabled-by-pad-display-kiosk.txt"
 LOG_FILE="$STATE_DIR/kiosk.log"
 
+AUTOLAUNCH_PLIST="/Library/LaunchDaemons/com.ipaddisplay.kiosk-autolaunch.plist"
+AUTOLAUNCH_HELPER="/usr/local/bin/paddisplay-kiosk-launch.sh"
+AUTOLAUNCH_LABEL="com.ipaddisplay.kiosk-autolaunch"
+PADDISPLAY_BUNDLE_ID="com.ipaddisplay.client"
+
+install_autolaunch() {
+    need_root apply
+
+    if [ ! -x /usr/bin/uiopen ]; then
+        log "WARN uiopen not found/executable; skipping PadDisplay autolaunch."
+        return 0
+    fi
+
+    mkdir -p /usr/local/bin
+
+    cat > "$AUTOLAUNCH_HELPER" <<'EOF'
+#!/bin/sh
+# Wait for SpringBoard to be usable, then launch PadDisplay as mobile.
+i=0
+while [ "$i" -lt 60 ]; do
+    if launchctl list 2>/dev/null | grep -Fq "com.apple.SpringBoard"; then
+        break
+    fi
+    if ps ax 2>/dev/null | grep -v grep | grep -q "[S]pringBoard"; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+
+sleep 5
+
+if [ -x /usr/bin/uiopen ]; then
+    su mobile -c "/usr/bin/uiopen --bundleid com.ipaddisplay.client" >/dev/null 2>&1 ||     /usr/bin/uiopen --bundleid com.ipaddisplay.client >/dev/null 2>&1 || true
+fi
+EOF
+    chmod 755 "$AUTOLAUNCH_HELPER"
+
+    cat > "$AUTOLAUNCH_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$AUTOLAUNCH_LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$AUTOLAUNCH_HELPER</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>LaunchOnlyOnce</key>
+    <true/>
+</dict>
+</plist>
+EOF
+    chmod 644 "$AUTOLAUNCH_PLIST"
+
+    launchctl unload "$AUTOLAUNCH_PLIST" >/dev/null 2>&1 || true
+    launchctl load "$AUTOLAUNCH_PLIST" >/dev/null 2>&1 || true
+    log "INSTALLED PadDisplay autolaunch."
+}
+
+remove_autolaunch() {
+    need_root restore
+    if [ -f "$AUTOLAUNCH_PLIST" ]; then
+        launchctl unload "$AUTOLAUNCH_PLIST" >/dev/null 2>&1 || true
+        rm -f "$AUTOLAUNCH_PLIST"
+    fi
+    rm -f "$AUTOLAUNCH_HELPER"
+    log "REMOVED PadDisplay autolaunch."
+}
+
+autolaunch_status() {
+    if [ -f "$AUTOLAUNCH_PLIST" ] && [ -x "$AUTOLAUNCH_HELPER" ]; then
+        echo "autolaunch  installed"
+    else
+        echo "autolaunch  not installed"
+    fi
+}
+
 SERVICES="
 /System/Library/LaunchDaemons/com.apple.homed.plist
 /System/Library/LaunchDaemons/com.apple.suggestd.plist
@@ -128,6 +209,8 @@ show_status() {
     done
     echo
     echo "* disabled by this kiosk script"
+    echo
+    autolaunch_status
 }
 
 dry_run() {
@@ -154,6 +237,7 @@ apply_changes() {
     for plist in $SERVICES; do
         disable_one "$plist"
     done
+    install_autolaunch
     log "Kiosk layer applied."
     echo
     echo "Reboot, then verify jailbreak, Wi-Fi, USB streaming, touch,"
@@ -168,6 +252,7 @@ restore_changes() {
         exit 0
     fi
     log "=== PadDisplay kiosk layer: restore ==="
+    remove_autolaunch
     while IFS= read -r plist; do
         [ -n "$plist" ] && restore_one "$plist"
     done < "$STATE_FILE"
