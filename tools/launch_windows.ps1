@@ -1,8 +1,22 @@
+param(
+  [switch]$NonInteractive,
+  [int]$DisplayIndex = -1,
+  [string]$Resolution = "1280x960",
+  [int]$Fps = 60,
+  [string]$Bitrate = ""
+)
+
 $ErrorActionPreference = "Stop"
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   $arg = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
+  if ($NonInteractive) {
+    $arg += ' -NonInteractive -DisplayIndex ' + $DisplayIndex +
+            ' -Resolution "' + $Resolution + '"' +
+            ' -Fps ' + $Fps +
+            ' -Bitrate "' + $Bitrate + '"'
+  }
   Start-Process powershell.exe -Verb RunAs -ArgumentList $arg
   exit 0
 }
@@ -178,25 +192,48 @@ for ($i=0; $i -lt $screens.Count; $i++) {
 }
 $defaultScreen=1
 for($i=$screens.Count-1;$i -ge 0;$i--){if(-not $screens[$i].Primary){$defaultScreen=$i+1;break}}
-$screen=$screens[(Read-Choice "Virtual display" $defaultScreen 1 $screens.Count)-1]
 
-Write-Host "[1] 1024x768   4M"
-Write-Host "[2] 1280x960   6M"
-Write-Host "[3] 1600x1200 10M"
-Write-Host "[4] 2048x1536 16M (native iPad Air)"
 $modes=@(
   @{W=1024;H=768;B="4M"},
   @{W=1280;H=960;B="6M"},
   @{W=1600;H=1200;B="10M"},
   @{W=2048;H=1536;B="16M"}
 )
-$mode=$modes[(Read-Choice "Resolution" 2 1 4)-1]
 
-Write-Host "[1] 60 fps"
-Write-Host "[2] 30 fps"
-$fps=if((Read-Choice "Frame rate" 1 1 2)-eq 1){60}else{30}
-$custom=Read-Host "Bitrate [$($mode.B)]"
-$bitrate=if([string]::IsNullOrWhiteSpace($custom)){$mode.B}else{$custom}
+if ($NonInteractive) {
+  if ($DisplayIndex -ge 0 -and $DisplayIndex -lt $screens.Count) {
+    $screen = $screens[$DisplayIndex]
+  } else {
+    $screen = $screens[$defaultScreen-1]
+  }
+
+  $mode = $null
+  foreach ($candidate in $modes) {
+    if (("$($candidate.W)x$($candidate.H)") -eq $Resolution) {
+      $mode = $candidate
+      break
+    }
+  }
+  if ($null -eq $mode) { throw "Unsupported resolution '$Resolution'." }
+  $fps = $Fps
+  if ($fps -ne 30 -and $fps -ne 60) { throw "Unsupported FPS '$fps'." }
+  $bitrate = if ([string]::IsNullOrWhiteSpace($Bitrate)) { $mode.B } else { $Bitrate }
+  Write-Host ("Using saved settings: display {0}, {1}x{2}@{3}, {4}" -f $screen.DeviceName,$mode.W,$mode.H,$fps,$bitrate)
+} else {
+  $screen=$screens[(Read-Choice "Virtual display" $defaultScreen 1 $screens.Count)-1]
+
+  Write-Host "[1] 1024x768   4M"
+  Write-Host "[2] 1280x960   6M"
+  Write-Host "[3] 1600x1200 10M"
+  Write-Host "[4] 2048x1536 16M (native iPad Air)"
+  $mode=$modes[(Read-Choice "Resolution" 2 1 4)-1]
+
+  Write-Host "[1] 60 fps"
+  Write-Host "[2] 30 fps"
+  $fps=if((Read-Choice "Frame rate" 1 1 2)-eq 1){60}else{30}
+  $custom=Read-Host "Bitrate [$($mode.B)]"
+  $bitrate=if([string]::IsNullOrWhiteSpace($custom)){$mode.B}else{$custom}
+}
 
 $restarted = Ensure-VddMode $mode.W $mode.H $fps
 if ($restarted) {
@@ -225,7 +262,9 @@ if($null -eq $foundAdapter){throw "Could not find $size through DXGI ddagrab."}
 
 Write-Host "Streaming $size @ $fps, $bitrate, DXGI adapter $foundAdapter output $foundOutput"
 Write-Host "Touch: native Windows multi-touch"
-Write-Host "Controls: press R to change settings, Q to quit." -ForegroundColor DarkGray
+if (-not $NonInteractive) {
+  Write-Host "Controls: press R to change settings, Q to quit." -ForegroundColor DarkGray
+}
 $pythonExe = (Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
 if (-not $pythonExe) { $pythonExe = (Get-Command python -ErrorAction Stop | Select-Object -First 1).Source }
 $usbProxy = $null
@@ -284,7 +323,7 @@ while ($true) {
   $switchToUsb = $false
 
   while (-not $streamProc.HasExited) {
-    if ([Console]::KeyAvailable) {
+    if (-not $NonInteractive -and [Console]::KeyAvailable) {
       $key = [Console]::ReadKey($true).Key
       if ($key -eq [ConsoleKey]::R) {
         Write-Host ""
