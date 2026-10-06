@@ -37,12 +37,12 @@ install_autolaunch() {
 
     cat > "$AUTOLAUNCH_HELPER" <<'EOF'
 #!/bin/sh
-# Wait for SpringBoard to be usable, then launch PadDisplay as mobile.
+LOG="/var/mobile/Library/PadDisplayKiosk/autolaunch.log"
+mkdir -p /var/mobile/Library/PadDisplayKiosk
+echo "$(date '+%Y-%m-%d %H:%M:%S') helper started" >> "$LOG"
+
 i=0
 while [ "$i" -lt 60 ]; do
-    if launchctl list 2>/dev/null | grep -Fq "com.apple.SpringBoard"; then
-        break
-    fi
     if ps ax 2>/dev/null | grep -v grep | grep -q "[S]pringBoard"; then
         break
     fi
@@ -52,9 +52,27 @@ done
 
 sleep 5
 
-if [ -x /usr/bin/uiopen ]; then
-    su mobile -c "/usr/bin/uiopen --bundleid com.ipaddisplay.client" >/dev/null 2>&1 ||     /usr/bin/uiopen --bundleid com.ipaddisplay.client >/dev/null 2>&1 || true
-fi
+i=0
+while [ "$i" -lt 45 ]; do
+    if ps ax 2>/dev/null | grep -v grep | grep -q "[P]adDisplay"; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') PadDisplay already running" >> "$LOG"
+        exit 0
+    fi
+
+    echo "$(date '+%Y-%m-%d %H:%M:%S') launch attempt $((i + 1))" >> "$LOG"
+    su mobile -c "/usr/bin/uiopen --bundleid com.ipaddisplay.client" >> "$LOG" 2>&1 || \
+        /usr/bin/uiopen --bundleid com.ipaddisplay.client >> "$LOG" 2>&1 || true
+
+    sleep 2
+    if ps ax 2>/dev/null | grep -v grep | grep -q "[P]adDisplay"; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') PadDisplay launched" >> "$LOG"
+        exit 0
+    fi
+    i=$((i + 1))
+done
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: PadDisplay did not launch" >> "$LOG"
+exit 1
 EOF
     chmod 755 "$AUTOLAUNCH_HELPER"
 
