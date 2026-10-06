@@ -1,4 +1,5 @@
 #import "PDStreamReceiver.h"
+#import "PDLog.h"
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <netinet/tcp.h>
@@ -80,7 +81,7 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
 - (void)runServer
 {
     self.listenFD = socket(AF_INET, SOCK_STREAM, 0);
-    if (self.listenFD < 0) return;
+    if (self.listenFD < 0) { PDLog(@"Receiver socket() failed errno=%d", errno); return; }
 
     int yes = 1;
     setsockopt(self.listenFD, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -95,12 +96,14 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
         listen(self.listenFD, 1) != 0) {
         close(self.listenFD);
         self.listenFD = -1;
+        PDLog(@"Receiver bind/listen failed errno=%d", errno);
         return;
     }
 
+    PDLog(@"Receiver listening on TCP %u", self.port);
     while (self.listenFD >= 0) {
         int client = accept(self.listenFD, NULL, NULL);
-        if (client < 0) continue;
+        if (client < 0) { if (self.listenFD >= 0) PDLog(@"Receiver accept failed errno=%d", errno); continue; }
 
         int one = 1;
         setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
@@ -108,6 +111,7 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
         setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
         self.clientFD = client;
+        PDLog(@"Receiver accepted client fd=%d", client);
         id<PDStreamReceiverDelegate> delegate = self.delegate;
         [delegate streamReceiverDidConnect:self];
 
@@ -128,6 +132,7 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
         shutdown(client, SHUT_RDWR);
         close(client);
         if (self.clientFD == client) self.clientFD = -1;
+        PDLog(@"Receiver client fd=%d disconnected", client);
         [delegate streamReceiverDidDisconnect:self error:nil];
     }
 }
