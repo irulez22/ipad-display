@@ -12,4 +12,4 @@ PadDisplay_INSTALL_PATH = /Applications
 include $(THEOS_MAKE_PATH)/application.mk
 
 after-install::
-	install.exec "killall -9 SpringBoard || true"
+	install.exec "uicache || true; killall -9 SpringBoard || true"
