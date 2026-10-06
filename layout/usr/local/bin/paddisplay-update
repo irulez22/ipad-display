@@ -1,0 +1,105 @@
+#!/bin/sh
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin
+REPO="irulez22/ipad-display"
+API="https://api.github.com/repos/$REPO/releases/latest"
+STATE="/var/mobile/Library/PadDisplayUpdater"
+LOG="$STATE/update.log"
+LOCK="$STATE/lock"
+TMP="$STATE/tmp"
+
+mkdir -p "$STATE"
+chmod 755 "$STATE" 2>/dev/null || true
+touch "$LOG"
+chmod 644 "$LOG" 2>/dev/null || true
+
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+}
+
+if ! mkdir "$LOCK" 2>/dev/null; then
+  exit 0
+fi
+trap 'rm -rf "$LOCK" "$TMP"' EXIT HUP INT TERM
+rm -rf "$TMP"
+mkdir -p "$TMP"
+
+if ! command -v curl >/dev/null 2>&1; then
+  log "curl not installed; skipping update check"
+  exit 0
+fi
+
+JSON="$TMP/latest.json"
+if ! curl -LfsS --connect-timeout 15 --max-time 45     -H "Accept: application/vnd.github+json"     -H "User-Agent: PadDisplay-iOS10-Updater"     "$API" -o "$JSON"; then
+  log "GitHub release check failed"
+  exit 0
+fi
+
+DEB_URL="$(sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\.deb\)".*/\1/p' "$JSON" | head -n 1)"
+SHA_URL="$(sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\.sha256\)".*/\1/p' "$JSON" | head -n 1)"
+
+if [ -z "$DEB_URL" ] || [ -z "$SHA_URL" ]; then
+  log "latest release has no .deb + .sha256 asset pair; skipping"
+  exit 0
+fi
+
+DEB="$TMP/PadDisplay.deb"
+SHA="$TMP/PadDisplay.deb.sha256"
+
+if ! curl -LfsS --connect-timeout 15 --max-time 120 "$DEB_URL" -o "$DEB"; then
+  log "failed to download deb"
+  exit 0
+fi
+if ! curl -LfsS --connect-timeout 15 --max-time 45 "$SHA_URL" -o "$SHA"; then
+  log "failed to download sha256"
+  exit 0
+fi
+
+EXPECTED="$(awk 'NR==1 {print $1}' "$SHA" | tr 'A-F' 'a-f')"
+ACTUAL=""
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL="$(sha256sum "$DEB" | awk '{print $1}' | tr 'A-F' 'a-f')"
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL="$(shasum -a 256 "$DEB" | awk '{print $1}' | tr 'A-F' 'a-f')"
+elif command -v openssl >/dev/null 2>&1; then
+  ACTUAL="$(openssl dgst -sha256 "$DEB" | awk '{print $NF}' | tr 'A-F' 'a-f')"
+else
+  log "no SHA-256 tool available; refusing update"
+  exit 0
+fi
+
+if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+  log "SHA-256 mismatch; refusing update"
+  exit 0
+fi
+
+if ! command -v dpkg-deb >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1; then
+  log "dpkg tools unavailable; refusing update"
+  exit 0
+fi
+
+NEW_VERSION="$(dpkg-deb -f "$DEB" Version 2>/dev/null)"
+CURRENT_VERSION="$(dpkg-query -W -f='${Version}' com.ipaddisplay.client 2>/dev/null || echo 0)"
+
+if [ -z "$NEW_VERSION" ]; then
+  log "could not read downloaded package version"
+  exit 0
+fi
+
+if ! dpkg --compare-versions "$NEW_VERSION" gt "$CURRENT_VERSION"; then
+  log "already current: installed=$CURRENT_VERSION latest=$NEW_VERSION"
+  exit 0
+fi
+
+log "installing PadDisplay $CURRENT_VERSION -> $NEW_VERSION"
+if ! dpkg -i "$DEB" >>"$LOG" 2>&1; then
+  log "dpkg install failed"
+  exit 0
+fi
+
+uicache >>"$LOG" 2>&1 || true
+killall -9 PadDisplay >/dev/null 2>&1 || true
+sleep 2
+if [ -x /usr/bin/uiopen ]; then
+  su mobile -c "/usr/bin/uiopen paddisplay://" >/dev/null 2>&1 || true
+fi
+log "update to $NEW_VERSION complete"
