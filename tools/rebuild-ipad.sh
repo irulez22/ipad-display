@@ -18,8 +18,9 @@ if [ ! -f "$THEOS/makefiles/common.mk" ]; then
   exit 1
 fi
 
-echo "==> Building PadDisplay package..."
-make clean package
+echo "==> Building PadDisplay final package..."
+make clean
+FINALPACKAGE=1 make package
 
 deb="$(find packages -maxdepth 1 -type f -name '*.deb' -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
 if [ -z "$deb" ] || [ ! -f "$deb" ]; then
@@ -68,11 +69,20 @@ fi
 if [ "${PADDISPLAY_NO_DESKTOP:-0}" != "1" ]; then
   echo
   echo "==> Rebuilding Windows launcher..."
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "\\wsl$\Ubuntu\home\josh\ipad-display\tools\build_windows_launcher.ps1"
+  win_build="$(wslpath -w "$PWD/tools/build_windows_launcher.ps1")"
+  (
+    cd /mnt/c/Users/Josh
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$win_build"
+  )
 
   echo "==> Restarting PadDisplay desktop launcher..."
-  cmd.exe /c "taskkill /IM PadDisplayLauncher.exe /F >nul 2>&1" || true
-  cmd.exe /c "start \"\" \"%LOCALAPPDATA%\PadDisplay\PadDisplayLauncher.exe\""
+  (
+    cd /mnt/c/Users/Josh
+    powershell.exe -NoProfile -Command '\
+      Stop-Process -Name PadDisplayLauncher -Force -ErrorAction SilentlyContinue; \
+      $exe = Join-Path $env:LOCALAPPDATA "PadDisplay\PadDisplayLauncher.exe"; \
+      if (Test-Path $exe) { Start-Process -FilePath $exe } else { throw "PadDisplay launcher not found: $exe" }'
+  )
 else
   echo
   echo "==> Desktop launcher rebuild disabled by PADDISPLAY_NO_DESKTOP=1"
