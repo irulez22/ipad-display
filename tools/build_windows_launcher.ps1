@@ -7,6 +7,21 @@ $manifest = Join-Path $outDir "PadDisplayLauncher.manifest"
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
+# The launcher executable cannot be overwritten while it is running.
+# Stop any existing instance before invoking csc, then wait briefly for
+# Windows to release the file handle.
+Get-Process PadDisplayLauncher -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+for ($i = 0; $i -lt 20; $i++) {
+  if (-not (Test-Path $exe)) { break }
+  try {
+    $stream = [System.IO.File]::Open($exe, 'Open', 'ReadWrite', 'None')
+    $stream.Close()
+    break
+  } catch {
+    Start-Sleep -Milliseconds 100
+  }
+}
+
 @'
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
