@@ -1,5 +1,6 @@
 param(
   [switch]$NonInteractive,
+  [switch]$UseSavedSettings,
   [int]$DisplayIndex = -1,
   [string]$Resolution = "1280x960",
   [int]$Fps = 60,
@@ -7,11 +8,25 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($UseSavedSettings) {
+  $saved = Get-ItemProperty -Path "HKCU:\Software\PadDisplay" -ErrorAction SilentlyContinue
+  if ($saved) {
+    if ($null -ne $saved.DisplayIndex) { $DisplayIndex = [int]$saved.DisplayIndex }
+    if ($saved.Resolution) { $Resolution = [string]$saved.Resolution }
+    if ($saved.Fps) { $Fps = [int]$saved.Fps }
+    if ($saved.Bitrate) { $Bitrate = [string]$saved.Bitrate }
+    $NonInteractive = $true
+  }
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   $arg = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
-  if ($NonInteractive) {
+  if ($UseSavedSettings) {
+    $arg += ' -UseSavedSettings'
+  } elseif ($NonInteractive) {
     $arg += ' -NonInteractive -DisplayIndex ' + $DisplayIndex +
             ' -Resolution "' + $Resolution + '"' +
             ' -Fps ' + $Fps +
