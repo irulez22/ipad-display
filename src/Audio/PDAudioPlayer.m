@@ -6,10 +6,21 @@
 @property(nonatomic) AudioQueueRef queue;
 @property(nonatomic) BOOL started;
 @property(nonatomic) NSUInteger packetCount;
+@property(nonatomic) NSUInteger queuedBuffers;
 @end
+
+static const NSUInteger PD_AUDIO_PREBUFFER_COUNT = 6; // ~120 ms at 20 ms/packet
 
 static void PDAudioQueueCallback(void *userData, AudioQueueRef queue, AudioQueueBufferRef buffer)
 {
+    PDAudioPlayer *player = (__bridge PDAudioPlayer *)userData;
+    @synchronized (player) {
+        if (player.queuedBuffers > 0) player.queuedBuffers--;
+        if (player.started && player.queuedBuffers == 0) {
+            player.started = NO;
+            PDLog(@"Audio underrun; rebuffering");
+        }
+    }
     if (buffer) AudioQueueFreeBuffer(queue, buffer);
 }
 
@@ -40,7 +51,9 @@ static void PDAudioQueueCallback(void *userData, AudioQueueRef queue, AudioQueue
 
     self.started = NO;
     self.packetCount = 0;
-    PDLog(@"Audio ready PCM 48000Hz stereo s16le");
+    self.queuedBuffers = 0;
+    PDLog(@"Audio ready PCM 48000Hz stereo s16le; prebuffer=%lu packets",
+          (unsigned long)PD_AUDIO_PREBUFFER_COUNT);
 }
 
 - (void)enqueuePCM:(NSData *)data
@@ -65,17 +78,24 @@ static void PDAudioQueueCallback(void *userData, AudioQueueRef queue, AudioQueue
         return;
     }
 
-    self.packetCount++;
-    if (!self.started) {
-        s = AudioQueueStart(self.queue, NULL);
-        if (s == noErr) {
-            self.started = YES;
-            PDLog(@"Audio playback started");
-        } else {
-            PDLog(@"AudioQueueStart failed status=%d", (int)s);
+    @synchronized (self) {
+        self.packetCount++;
+        self.queuedBuffers++;
+
+        if (!self.started && self.queuedBuffers >= PD_AUDIO_PREBUFFER_COUNT) {
+            s = AudioQueueStart(self.queue, NULL);
+            if (s == noErr) {
+                self.started = YES;
+                PDLog(@"Audio playback started buffered=%lu",
+                      (unsigned long)self.queuedBuffers);
+            } else {
+                PDLog(@"AudioQueueStart failed status=%d", (int)s);
+            }
+        } else if (self.packetCount % 500 == 0) {
+            PDLog(@"Audio packets=%lu queued=%lu",
+                  (unsigned long)self.packetCount,
+                  (unsigned long)self.queuedBuffers);
         }
-    } else if (self.packetCount % 500 == 0) {
-        PDLog(@"Audio packets=%lu", (unsigned long)self.packetCount);
     }
 }
 
@@ -88,6 +108,7 @@ static void PDAudioQueueCallback(void *userData, AudioQueueRef queue, AudioQueue
     }
     self.started = NO;
     self.packetCount = 0;
+    self.queuedBuffers = 0;
 
     PDLog(@"Audio reset");
 }
