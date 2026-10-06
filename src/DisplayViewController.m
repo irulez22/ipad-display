@@ -30,6 +30,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
     [super viewDidLoad];
 
     self.view.backgroundColor = [UIColor blackColor];
+    [UIApplication sharedApplication].idleTimerDisabled = YES;
     self.view.multipleTouchEnabled = YES;
     self.touchIDs = [NSMutableDictionary dictionary];
     self.nextTouchID = 0;
