@@ -33,7 +33,7 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
     OSStatus s=CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault,2,p,z,4,&_formatDescription);
     if(s!=noErr || !self.formatDescription){[self report:[NSString stringWithFormat:@"Format description error: %d",(int)s]];return;}
     VTDecompressionOutputCallbackRecord cb={PDDecompressionCallback,(__bridge void*)self};
-    NSDictionary*attrs=@{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)};
+    NSDictionary*attrs=@{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),(id)kCVPixelBufferIOSurfacePropertiesKey:@{}};
     s=VTDecompressionSessionCreate(kCFAllocatorDefault,self.formatDescription,NULL,(__bridge CFDictionaryRef)attrs,&cb,&_session);
     if(s==noErr && self.session){ Boolean realtime = true; VTSessionSetProperty(self.session, kVTDecompressionPropertyKey_RealTime, realtime ? kCFBooleanTrue : kCFBooleanFalse); PDLog(@"Decoder session created (async realtime, system-selected buffers)"); [self report:@"Decoder ready (VideoToolbox)"]; }
     else [self report:[NSString stringWithFormat:@"VideoToolbox session error: %d",(int)s]];
@@ -75,41 +75,43 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
     if(self.frameCount==1 || self.frameCount%120==0){size_t w=CVPixelBufferGetWidth(imageBuffer),h=CVPixelBufferGetHeight(imageBuffer);[self report:[NSString stringWithFormat:@"VideoToolbox OK - %lux%lu - frames %lu",(unsigned long)w,(unsigned long)h,(unsigned long)self.frameCount]];}
 
     dispatch_async(self.presentationQueue, ^{
-        CMVideoFormatDescriptionRef fd=NULL;
-        CMSampleBufferRef sb=NULL;
-        OSStatus e=CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,imageBuffer,&fd);
-        if(e==noErr && fd){
-            CMSampleTimingInfo ti={kCMTimeInvalid,kCMTimeInvalid,kCMTimeInvalid};
-            e=CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,imageBuffer,YES,NULL,NULL,fd,&ti,&sb);
-        }
-
-        if(e==noErr && sb){
-            CFArrayRef aa=CMSampleBufferGetSampleAttachmentsArray(sb,YES);
-            if(aa&&CFArrayGetCount(aa)){
-                CFMutableDictionaryRef a=(CFMutableDictionaryRef)CFArrayGetValueAtIndex(aa,0);
-                CFDictionarySetValue(a,kCMSampleAttachmentKey_DisplayImmediately,kCFBooleanTrue);
+        @autoreleasepool {
+            CMVideoFormatDescriptionRef fd=NULL;
+            CMSampleBufferRef sb=NULL;
+            OSStatus e=CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,imageBuffer,&fd);
+            if(e==noErr && fd){
+                CMSampleTimingInfo ti={kCMTimeInvalid,kCMTimeInvalid,kCMTimeInvalid};
+                e=CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,imageBuffer,YES,NULL,NULL,fd,&ti,&sb);
             }
 
-            NSUInteger waits=0;
-            while(!self.displayLayer.readyForMoreMediaData){
-                usleep(1000);
-                waits++;
-                if(waits==50 || waits==250 || waits==1000){
-                    PDLog(@"Display backpressure waiting=%lums",(unsigned long)waits);
+            if(e==noErr && sb){
+                CFArrayRef aa=CMSampleBufferGetSampleAttachmentsArray(sb,YES);
+                if(aa&&CFArrayGetCount(aa)){
+                    CFMutableDictionaryRef a=(CFMutableDictionaryRef)CFArrayGetValueAtIndex(aa,0);
+                    CFDictionarySetValue(a,kCMSampleAttachmentKey_DisplayImmediately,kCFBooleanTrue);
                 }
+
+                NSUInteger waits=0;
+                while(!self.displayLayer.readyForMoreMediaData){
+                    usleep(1000);
+                    waits++;
+                    if(waits==50 || waits==250 || waits==1000){
+                        PDLog(@"Display backpressure waiting=%lums",(unsigned long)waits);
+                    }
+                }
+
+                dispatch_sync(dispatch_get_main_queue(), ^{
+                    [self.displayLayer enqueueSampleBuffer:sb];
+                });
+            } else {
+                PDLog(@"SampleBuffer creation failed status=%d",(int)e);
             }
 
-            dispatch_sync(dispatch_get_main_queue(), ^{
-                [self.displayLayer enqueueSampleBuffer:sb];
-            });
-        } else {
-            PDLog(@"SampleBuffer creation failed status=%d",(int)e);
+            if(sb)CFRelease(sb);
+            if(fd)CFRelease(fd);
+            CFRelease(imageBuffer);
+            dispatch_semaphore_signal(self.presentationSlots);
         }
-
-        if(sb)CFRelease(sb);
-        if(fd)CFRelease(fd);
-        CFRelease(imageBuffer);
-        dispatch_semaphore_signal(self.presentationSlots);
     });
 }
 @end
