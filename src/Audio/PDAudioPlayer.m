@@ -1,6 +1,5 @@
 #import "PDAudioPlayer.h"
 #import "PDLog.h"
-#import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 
 @interface PDAudioPlayer ()
@@ -19,14 +18,6 @@ static void PDAudioQueueCallback(void *userData, AudioQueueRef queue, AudioQueue
 - (void)ensureQueue
 {
     if (self.queue) return;
-
-    AVAudioSession *session = [AVAudioSession sharedInstance];
-    NSError *error = nil;
-    [session setCategory:AVAudioSessionCategoryPlayback error:&error];
-    if (error) PDLog(@"Audio session category error=%@", error);
-    error = nil;
-    [session setActive:YES error:&error];
-    if (error) PDLog(@"Audio session activate error=%@", error);
 
     AudioStreamBasicDescription fmt;
     memset(&fmt, 0, sizeof(fmt));
@@ -98,8 +89,6 @@ static void PDAudioQueueCallback(void *userData, AudioQueueRef queue, AudioQueue
     self.started = NO;
     self.packetCount = 0;
 
-    NSError *error = nil;
-    [[AVAudioSession sharedInstance] setActive:NO error:&error];
     PDLog(@"Audio reset");
 }
 
