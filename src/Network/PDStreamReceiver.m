@@ -116,17 +116,19 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
         [delegate streamReceiverDidConnect:self];
 
         while (self.clientFD == client) {
-            uint32_t networkLength = 0;
-            uint8_t type = 0;
-            if (![self readExactly:&networkLength length:4 fd:client]) break;
+            @autoreleasepool {
+                uint32_t networkLength = 0;
+                uint8_t type = 0;
+                if (![self readExactly:&networkLength length:4 fd:client]) break;
 
-            uint32_t length = ntohl(networkLength);
-            if (length > PDMaximumPayload) break;
-            if (![self readExactly:&type length:1 fd:client]) break;
+                uint32_t length = ntohl(networkLength);
+                if (length > PDMaximumPayload) break;
+                if (![self readExactly:&type length:1 fd:client]) break;
 
-            NSMutableData *payload = [NSMutableData dataWithLength:length];
-            if (length && ![self readExactly:payload.mutableBytes length:length fd:client]) break;
-            [delegate streamReceiver:self didReceivePacketType:type payload:payload];
+                NSMutableData *payload = [NSMutableData dataWithLength:length];
+                if (length && ![self readExactly:payload.mutableBytes length:length fd:client]) break;
+                [delegate streamReceiver:self didReceivePacketType:type payload:payload];
+            }
         }
 
         shutdown(client, SHUT_RDWR);
