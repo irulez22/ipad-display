@@ -2,10 +2,12 @@
 #import "PDStreamReceiver.h"
 #import "PDH264Parser.h"
 #import "PDVideoDecoder.h"
+#import "PDAudioPlayer.h"
 #import "PDLog.h"
 #import <AVFoundation/AVFoundation.h>
 
 static const uint8_t PD_PACKET_TOUCH_V2 = 0x11;
+static const uint8_t PD_PACKET_AUDIO_PCM = 0x20;
 static const uint8_t PD_TOUCH_DOWN = 0;
 static const uint8_t PD_TOUCH_MOVE = 1;
 static const uint8_t PD_TOUCH_UP = 2;
@@ -18,6 +20,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 @property(nonatomic,strong) PDStreamReceiver *receiver;
 @property(nonatomic,strong) PDH264Parser *parser;
 @property(nonatomic,strong) PDVideoDecoder *decoder;
+@property(nonatomic,strong) PDAudioPlayer *audioPlayer;
 @property(nonatomic,strong) NSMutableDictionary *touchIDs;
 @property(nonatomic) uint16_t nextTouchID;
 @property(nonatomic) BOOL videoReady;
@@ -48,6 +51,8 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 
     self.decoder = [[PDVideoDecoder alloc] initWithDisplayLayer:self.displayLayer];
     self.decoder.delegate = self;
+
+    self.audioPlayer = [[PDAudioPlayer alloc] init];
 
     self.parser = [[PDH264Parser alloc] init];
     self.parser.delegate = self;
@@ -87,6 +92,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
     [self.parser flush];
     [self.decoder flush];
     [self.decoder reset];
+    [self.audioPlayer reset];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         self.statusLabel.hidden = NO;
@@ -98,6 +104,8 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 {
     if (type == 0x01) {
         [self.parser appendData:payload];
+    } else if (type == PD_PACKET_AUDIO_PCM) {
+        [self.audioPlayer enqueuePCM:payload];
     } else if (type == 0x04) {
         PDLog(@"Host requested disconnect");
         [self.parser flush];
