@@ -30,7 +30,6 @@ SERVICES="
 /System/Library/LaunchDaemons/com.apple.OTACrashCopier.plist
 /System/Library/LaunchDaemons/com.apple.ReportCrash.Jetsam.plist
 /System/Library/LaunchDaemons/com.apple.ReportCrash.SafetyNet.plist
-/System/Library/LaunchDaemons/com.apple.ReportCrash.SimulateCrash.plist
 /System/Library/LaunchDaemons/com.apple.ReportCrash.plist
 /System/Library/LaunchDaemons/com.apple.CrashHousekeeping.plist
 /System/Library/LaunchDaemons/com.apple.DumpBasebandCrash.plist
