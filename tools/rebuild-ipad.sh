@@ -87,6 +87,13 @@ fi
 
 if [ "${PADDISPLAY_NO_DEVICE_TRIGGER:-0}" != "1" ]; then
   echo
+  echo "==> Staging iPad package over SSH..."
+  stage_sha="$(mktemp)"
+  sha256sum "$deb" > "$stage_sha"
+  scp -q "$deb" ipad:/var/mobile/Library/PadDisplayUpdate.deb
+  scp -q "$stage_sha" ipad:/var/mobile/Library/PadDisplayUpdate.deb.sha256
+  rm -f "$stage_sha"
+
   echo "==> Triggering immediate iPad update..."
   ssh ipad 'touch /var/mobile/Library/PadDisplayUpdateNow'
   echo "==> Waiting for iPad to report v$version..."
@@ -103,6 +110,7 @@ if [ "${PADDISPLAY_NO_DEVICE_TRIGGER:-0}" != "1" ]; then
 
   if [ "$installed" != "$version" ]; then
     echo "ERROR: iPad did not update to $version (still reports: ${installed:-unknown})." >&2
+    echo "If the device is older than 0.7.1, install 0.7.1 once as root so the staged-package updater is present." >&2
     echo "==> Last updater log lines:" >&2
     ssh ipad 'tail -n 40 /var/mobile/Library/PadDisplayUpdater/update.log 2>/dev/null || true' >&2 || true
     exit 1
