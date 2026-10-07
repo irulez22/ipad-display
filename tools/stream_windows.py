@@ -766,8 +766,16 @@ def main():
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-        hello = ('{"protocol":%d,"host":"windows","audio_pcm_v2":true,"audio_port":%d}' %
-                 (PROTOCOL_VERSION, args.audio_port)).encode("utf-8")
+        hello = json.dumps({
+            "protocol": PROTOCOL_VERSION,
+            "host": "windows",
+            "audio_pcm_v2": True,
+            "audio_port": args.audio_port,
+            "width": width_i,
+            "height": height_i,
+            "fps": args.fps,
+            "bitrate": args.bitrate,
+        }, separators=(",", ":")).encode("utf-8")
         send_packet(sock, CONFIG, hello)
 
         if None not in (args.touch_left, args.touch_top, args.touch_width, args.touch_height):
