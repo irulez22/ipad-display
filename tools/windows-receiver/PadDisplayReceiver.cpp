@@ -196,23 +196,109 @@ public:
 
     HRESULT PresentSample(IMFSample* sample) {
         ComPtr<IMFMediaBuffer> buffer;
-        HRESULT hr = sample->GetBufferByIndex(0, &buffer);
-        if (FAILED(hr)) return hr;
-
-        ComPtr<IMFDXGIBuffer> dxgiBuffer;
-        hr = buffer.As(&dxgiBuffer);
-        if (FAILED(hr)) return hr;
+        HRESULT hr = sample->ConvertToContiguousBuffer(&buffer);
+        if (FAILED(hr)) {
+            g_lastHr = (unsigned long)hr;
+            return hr;
+        }
 
         ComPtr<ID3D11Texture2D> inputTex;
-        hr = dxgiBuffer->GetResource(IID_PPV_ARGS(&inputTex));
-        if (FAILED(hr)) return hr;
-
         UINT subresource = 0;
-        dxgiBuffer->GetSubresourceIndex(&subresource);
+
+        // Fast path: decoder produced a D3D11/DXGI-backed surface.
+        ComPtr<IMFDXGIBuffer> dxgiBuffer;
+        if (SUCCEEDED(buffer.As(&dxgiBuffer))) {
+            hr = dxgiBuffer->GetResource(IID_PPV_ARGS(&inputTex));
+            if (FAILED(hr)) {
+                g_lastHr = (unsigned long)hr;
+                return hr;
+            }
+            dxgiBuffer->GetSubresourceIndex(&subresource);
+        } else {
+            // Compatibility path: some systems expose Microsoft's H.264 MFT
+            // without DXGI-backed output even after receiving the D3D manager.
+            // Keep the efficient NV12 format and upload one frame to a reusable
+            // D3D11 texture instead of converting to BGRA / GDI.
+            if (!uploadTexture_ || uploadW_ != (UINT)g_streamWidth || uploadH_ != (UINT)g_streamHeight) {
+                D3D11_TEXTURE2D_DESC desc{};
+                desc.Width = g_streamWidth;
+                desc.Height = g_streamHeight;
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.Format = DXGI_FORMAT_NV12;
+                desc.SampleDesc.Count = 1;
+                desc.Usage = D3D11_USAGE_DYNAMIC;
+                desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DECODER;
+                desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+                uploadTexture_.Reset();
+                hr = device_->CreateTexture2D(&desc, nullptr, &uploadTexture_);
+                if (FAILED(hr)) {
+                    // Some drivers reject DECODER on dynamic textures.
+                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    hr = device_->CreateTexture2D(&desc, nullptr, &uploadTexture_);
+                }
+                if (FAILED(hr)) {
+                    g_lastHr = (unsigned long)hr;
+                    return hr;
+                }
+                uploadW_ = desc.Width;
+                uploadH_ = desc.Height;
+            }
+
+            BYTE* src = nullptr;
+            DWORD maxLen = 0, curLen = 0;
+            hr = buffer->Lock(&src, &maxLen, &curLen);
+            if (FAILED(hr)) {
+                g_lastHr = (unsigned long)hr;
+                return hr;
+            }
+
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            hr = context_->Map(uploadTexture_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+            if (SUCCEEDED(hr)) {
+                const UINT width = (UINT)g_streamWidth;
+                const UINT height = (UINT)g_streamHeight;
+                const size_t yBytes = (size_t)width * height;
+                const size_t uvBytes = (size_t)width * (height / 2);
+                if (curLen >= yBytes + uvBytes) {
+                    const BYTE* srcY = src;
+                    const BYTE* srcUV = src + yBytes;
+                    BYTE* dstY = (BYTE*)mapped.pData;
+                    BYTE* dstUV = dstY + mapped.RowPitch * height;
+
+                    for (UINT y = 0; y < height; ++y) {
+                        memcpy(dstY + (size_t)y * mapped.RowPitch,
+                               srcY + (size_t)y * width,
+                               width);
+                    }
+                    for (UINT y = 0; y < height / 2; ++y) {
+                        memcpy(dstUV + (size_t)y * mapped.RowPitch,
+                               srcUV + (size_t)y * width,
+                               width);
+                    }
+                } else {
+                    hr = MF_E_BUFFERTOOSMALL;
+                }
+                context_->Unmap(uploadTexture_.Get(), 0);
+            }
+            buffer->Unlock();
+
+            if (FAILED(hr)) {
+                g_lastHr = (unsigned long)hr;
+                return hr;
+            }
+
+            inputTex = uploadTexture_;
+            subresource = 0;
+        }
 
         ComPtr<ID3D11Texture2D> backBuffer;
         hr = swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) {
+            g_lastHr = (unsigned long)hr;
+            return hr;
+        }
 
         D3D11_TEXTURE2D_DESC inDesc{}, outDesc{};
         inputTex->GetDesc(&inDesc);
@@ -235,7 +321,10 @@ public:
 
         ComPtr<ID3D11VideoProcessorInputView> inView;
         hr = videoDevice_->CreateVideoProcessorInputView(inputTex.Get(), enumerator_.Get(), &inViewDesc, &inView);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) {
+            g_lastHr = (unsigned long)hr;
+            return hr;
+        }
 
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outViewDesc{};
         outViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
@@ -243,26 +332,27 @@ public:
 
         ComPtr<ID3D11VideoProcessorOutputView> outView;
         hr = videoDevice_->CreateVideoProcessorOutputView(backBuffer.Get(), enumerator_.Get(), &outViewDesc, &outView);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) {
+            g_lastHr = (unsigned long)hr;
+            return hr;
+        }
 
-        RECT src{0, 0, (LONG)inDesc.Width, (LONG)inDesc.Height};
-        RECT dst{0, 0, (LONG)outDesc.Width, (LONG)outDesc.Height};
-        videoContext_->VideoProcessorSetStreamSourceRect(processor_.Get(), 0, TRUE, &src);
-        videoContext_->VideoProcessorSetStreamDestRect(processor_.Get(), 0, TRUE, &dst);
-        videoContext_->VideoProcessorSetOutputTargetRect(processor_.Get(), TRUE, &dst);
+        RECT srcRect{0, 0, (LONG)inDesc.Width, (LONG)inDesc.Height};
+        RECT dstRect{0, 0, (LONG)outDesc.Width, (LONG)outDesc.Height};
+        videoContext_->VideoProcessorSetStreamSourceRect(processor_.Get(), 0, TRUE, &srcRect);
+        videoContext_->VideoProcessorSetStreamDestRect(processor_.Get(), 0, TRUE, &dstRect);
+        videoContext_->VideoProcessorSetOutputTargetRect(processor_.Get(), TRUE, &dstRect);
 
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
         stream.pInputSurface = inView.Get();
 
         hr = videoContext_->VideoProcessorBlt(processor_.Get(), outView.Get(), 0, 1, &stream);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) {
+            g_lastHr = (unsigned long)hr;
+            return hr;
+        }
 
-        // Do not use DXGI_PRESENT_DO_NOT_WAIT here. The iPad client applies
-        // presentation backpressure rather than intentionally dropping frames,
-        // and the Windows receiver should do the same. Present at the display
-        // refresh interval so the decoder naturally blocks instead of racing
-        // ahead of the swap chain and freezing on DXGI_ERROR_WAS_STILL_DRAWING.
         hr = swapChain_->Present(1, 0);
         if (SUCCEEDED(hr)) {
             ++g_presentedFrames;
@@ -281,6 +371,8 @@ private:
     ComPtr<ID3D11VideoContext> videoContext_;
     ComPtr<ID3D11VideoProcessorEnumerator> enumerator_;
     ComPtr<ID3D11VideoProcessor> processor_;
+    ComPtr<ID3D11Texture2D> uploadTexture_;
+    UINT uploadW_ = 0, uploadH_ = 0;
     UINT lastInW_ = 0, lastInH_ = 0;
 };
 
