@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Capture the Windows desktop with FFmpeg and stream H.264 to PadDisplay."""
 import argparse
+import json
+import os
 import ctypes
 from ctypes import wintypes
 import shutil
@@ -55,6 +57,7 @@ class StreamStats:
         self.started = time.monotonic()
         self.last_video = None
         self.last_audio = None
+        self.ipad_hello = {}
 
     def add_video(self, count):
         with self.lock:
@@ -70,6 +73,10 @@ class StreamStats:
         with self.lock:
             self.touch_packets += 1
 
+    def set_ipad_hello(self, hello):
+        with self.lock:
+            self.ipad_hello = dict(hello or {})
+
     def snapshot(self):
         with self.lock:
             return (
@@ -79,12 +86,13 @@ class StreamStats:
                 self.started,
                 self.last_video,
                 self.last_audio,
+                dict(self.ipad_hello),
             )
 
 
 def watchdog_loop(stats, proc, stop_event, stall_seconds=5.0):
     while not stop_event.wait(1.0):
-        _, _, _, started, last_video, _ = stats.snapshot()
+        _, _, _, started, last_video, _, _ = stats.snapshot()
         now = time.monotonic()
         if last_video is None:
             if now - started > stall_seconds:
@@ -99,11 +107,11 @@ def watchdog_loop(stats, proc, stop_event, stall_seconds=5.0):
             return
 
 
-def status_loop(stats, stop_event):
+def status_loop(stats, stop_event, status_file=None, transport="unknown", host="unknown"):
     last_video = 0
     last_audio = 0
     while not stop_event.wait(1.0):
-        video, audio, touches, started, last_video_time, last_audio_time = stats.snapshot()
+        video, audio, touches, started, last_video_time, last_audio_time, ipad_hello = stats.snapshot()
         video_mbps = (video - last_video) * 8.0 / 1000000.0
         audio_kbps = (audio - last_audio) * 8.0 / 1000.0
         elapsed = int(time.monotonic() - started)
@@ -115,6 +123,36 @@ def status_loop(stats, stop_event):
             % (elapsed, video_mbps, video_age, audio_kbps, audio_age, touches),
             flush=True,
         )
+        if status_file:
+            payload = {
+                "state": "running",
+                "transport": transport,
+                "host": host,
+                "uptime_s": elapsed,
+                "video_mbps": round(video_mbps, 3),
+                "audio_kbps": round(audio_kbps, 1),
+                "video_age_s": None if last_video_time is None else round(now - last_video_time, 2),
+                "audio_age_s": None if last_audio_time is None else round(now - last_audio_time, 2),
+                "touch_packets": touches,
+                "protocol": ipad_hello.get("protocol"),
+                "ipad_app": ipad_hello.get("app"),
+                "ipad_build": ipad_hello.get("build"),
+                "ipad_name": ipad_hello.get("name"),
+                "ipad_device": ipad_hello.get("device"),
+                "ipad_width": ipad_hello.get("width"),
+                "ipad_height": ipad_hello.get("height"),
+                "updated_unix": time.time(),
+            }
+            try:
+                directory = os.path.dirname(status_file)
+                if directory:
+                    os.makedirs(directory, exist_ok=True)
+                temp_path = status_file + ".tmp"
+                with open(temp_path, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, separators=(",", ":"))
+                os.replace(temp_path, status_file)
+            except OSError:
+                pass
         last_video = video
         last_audio = audio
 
@@ -451,7 +489,14 @@ def input_loop(sock, monitor_rect, stats=None):
 
             if packet_type == CONFIG:
                 try:
-                    print("iPad hello: %s" % payload.decode("utf-8", "replace"), flush=True)
+                    text = payload.decode("utf-8", "replace")
+                    print("iPad hello: %s" % text, flush=True)
+                    try:
+                        hello = json.loads(text)
+                        if stats is not None and isinstance(hello, dict):
+                            stats.set_ipad_hello(hello)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             elif packet_type == TOUCH_V2:
@@ -574,6 +619,8 @@ def main():
     p.add_argument("--touch-height", type=int, default=None)
     p.add_argument("--audio-loopback", default=None, help="WASAPI loopback helper executable; enables mirrored audio")
     p.add_argument("--audio-port", type=int, default=AUDIO_PORT, help="Dedicated Wi-Fi audio TCP port")
+    p.add_argument("--status-file", default=None, help="Write live JSON telemetry for the launcher")
+    p.add_argument("--transport", default="unknown", help="Transport label for telemetry")
     args = p.parse_args()
 
     if shutil.which(args.ffmpeg) is None and args.ffmpeg == "ffmpeg":
@@ -734,7 +781,7 @@ def main():
         stop_status = threading.Event()
         status_thread = threading.Thread(
             target=status_loop,
-            args=(stats, stop_status),
+            args=(stats, stop_status, args.status_file, args.transport, args.host),
             daemon=True,
         )
         status_thread.start()
