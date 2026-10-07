@@ -11,6 +11,7 @@ class PadDisplayLauncher : Form
     ComboBox resolution = new ComboBox();
     ComboBox fps = new ComboBox();
     TextBox bitrate = new TextBox();
+    TextBox receiverHost = new TextBox();
     CheckBox startup = new CheckBox();
     CheckBox autostart = new CheckBox();
     CheckBox minimized = new CheckBox();
@@ -49,8 +50,8 @@ class PadDisplayLauncher : Form
         Font = new Font("Segoe UI", 9);
 
         var top = new TableLayoutPanel();
-        top.Dock = DockStyle.Top; top.Height = 180;
-        top.Padding = new Padding(12); top.ColumnCount = 4; top.RowCount = 5;
+        top.Dock = DockStyle.Top; top.Height = 220;
+        top.Padding = new Padding(12); top.ColumnCount = 4; top.RowCount = 6;
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
@@ -62,22 +63,26 @@ class PadDisplayLauncher : Form
         fps.DropDownStyle = ComboBoxStyle.DropDownList; fps.Dock = DockStyle.Fill;
         fps.Items.AddRange(new object[] {"60","30"});
         bitrate.Dock = DockStyle.Fill;
+        receiverHost.Dock = DockStyle.Fill;
+        receiverHost.PlaceholderText = "blank = iPad, or laptop IP/hostname";
 
         AddRow(top,0,"Display",display,"Resolution",resolution);
         AddRow(top,1,"FPS",fps,"Bitrate",bitrate);
+        top.Controls.Add(new Label {Text="Receiver host",AutoSize=true,Anchor=AnchorStyles.Left},0,2);
+        top.Controls.Add(receiverHost,1,2); top.SetColumnSpan(receiverHost,3);
 
         startup.Text = "Start with Windows"; startup.AutoSize = true;
         autostart.Text = "Automatically start streaming"; autostart.AutoSize = true;
         minimized.Text = "Start minimized to tray"; minimized.AutoSize = true;
-        top.Controls.Add(startup,0,2); top.SetColumnSpan(startup,2);
-        top.Controls.Add(autostart,2,2); top.SetColumnSpan(autostart,2);
-        top.Controls.Add(minimized,0,3); top.SetColumnSpan(minimized,2);
+        top.Controls.Add(startup,0,3); top.SetColumnSpan(startup,2);
+        top.Controls.Add(autostart,2,3); top.SetColumnSpan(autostart,2);
+        top.Controls.Add(minimized,0,4); top.SetColumnSpan(minimized,2);
 
         var buttons = new FlowLayoutPanel(); buttons.Dock = DockStyle.Fill;
         start.Text="Start"; stop.Text="Stop"; save.Text="Save settings"; diagnostics.Text="Diagnostics";
         start.Width=90; stop.Width=90; save.Width=110; diagnostics.Width=100; stop.Enabled=false;
         buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(save); buttons.Controls.Add(diagnostics);
-        top.Controls.Add(buttons,2,3); top.SetColumnSpan(buttons,2);
+        top.Controls.Add(buttons,2,4); top.SetColumnSpan(buttons,2);
 
         status.Text="Stopped"; status.Dock=DockStyle.Top; status.Height=50; status.Padding=new Padding(12,5,0,0);
         log.Dock=DockStyle.Fill; log.Multiline=true; log.ReadOnly=true; log.ScrollBars=ScrollBars.Vertical;
@@ -175,6 +180,7 @@ class PadDisplayLauncher : Form
         resolution.SelectedItem=resolution.Items.Contains(r)?r:"1280x960";
         string f=ReadReg("Fps","60"); fps.SelectedItem=f=="30"?"30":"60";
         bitrate.Text=ReadReg("Bitrate","6M");
+        receiverHost.Text=ReadReg("ReceiverHost","");
         startup.Checked=ReadReg("StartWithWindows","False")=="True";
         autostart.Checked=ReadReg("AutoStartStream","False")=="True";
         minimized.Checked=ReadReg("StartMinimized","False")=="True";
@@ -190,6 +196,7 @@ class PadDisplayLauncher : Form
             k.SetValue("Resolution",Convert.ToString(resolution.SelectedItem));
             k.SetValue("Fps",Convert.ToString(fps.SelectedItem));
             k.SetValue("Bitrate",bitrate.Text.Trim());
+            k.SetValue("ReceiverHost",receiverHost.Text.Trim());
             k.SetValue("StartWithWindows",startup.Checked);
             k.SetValue("AutoStartStream",autostart.Checked);
             k.SetValue("StartMinimized",minimized.Checked);
