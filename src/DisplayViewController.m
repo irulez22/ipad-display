@@ -80,10 +80,16 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 
 - (void)streamReceiverDidConnect:(PDStreamReceiver *)receiver
 {
+    NSString *appVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"unknown";
+    NSString *buildVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"unknown";
     NSDictionary *hello = @{
         @"protocol": @1,
-        @"app": @"0.6.7",
-        @"build": @22,
+        @"app": appVersion,
+        @"build": buildVersion,
+        @"device": [UIDevice currentDevice].model ?: @"iPad",
+        @"name": [UIDevice currentDevice].name ?: @"iPad",
+        @"width": @((NSInteger)[UIScreen mainScreen].nativeBounds.size.width),
+        @"height": @((NSInteger)[UIScreen mainScreen].nativeBounds.size.height),
         @"audio_pcm_v2": @YES,
         @"audio_port": @4824
     };
@@ -156,10 +162,17 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
             PDLog(@"AUDIO_PCM_V2 packet too short: %lu bytes", (unsigned long)payload.length);
         }
     } else if (type == 0x04) {
-        PDLog(@"Host requested disconnect");
-        [self.parser flush];
-        [self.decoder flush];
-        [receiver disconnectClient];
+        if (receiver == self.audioReceiver) {
+            PDLog(@"Host requested audio disconnect");
+            [self.audioPlayer reset];
+            self.audioPlayer = nil;
+            [receiver disconnectClient];
+        } else {
+            PDLog(@"Host requested video/touch disconnect");
+            [self.parser flush];
+            [self.decoder flush];
+            [receiver disconnectClient];
+        }
     }
 }
 
