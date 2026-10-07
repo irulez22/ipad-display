@@ -392,6 +392,8 @@ while ($true) {
     $targetHost = $ReceiverHost
     $targetPort = 4822
     Write-Host "Transport: Windows receiver ($targetHost)" -ForegroundColor Green
+    $audioHelper = Ensure-WasapiHelper
+    Write-Host "Audio: laptop session mirror enabled" -ForegroundColor Cyan
   } elseif (-not $usingUsb) {
     $forceWifiNext = $false
     $targetHost = Resolve-PadDisplayHost
@@ -418,7 +420,7 @@ while ($true) {
     "--status-file", ("`"" + $statusFile + "`""),
     "--transport", $(if ($usingWindowsReceiver) { "Windows" } elseif ($usingUsb) { "USB" } else { "Wi-Fi" })
   )
-  if (-not $usingUsb -and -not $usingWindowsReceiver) {
+  if (-not $usingUsb) {
     $streamArgs += @("--audio-loopback", "`"$audioHelper`"")
   }
   $streamProc = Start-Process -FilePath $pythonExe -ArgumentList $streamArgs -NoNewWindow -PassThru
