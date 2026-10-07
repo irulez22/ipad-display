@@ -1,0 +1,66 @@
+=== Windows ===
+
+
+WindowsProductName : Windows 10 Pro
+WindowsVersion     : 2009
+OsBuildNumber      : 26200
+
+
+
+=== GPU ===
+
+Name                       DriverVersion
+----                       -------------
+Virtual Display Driver     23.40.36.27  
+NVIDIA GeForce RTX 4060 Ti 32.0.16.1664 
+
+
+=== PadDisplay / Virtual display devices ===
+
+Status  Class   FriendlyName               InstanceId               
+------  -----   ------------               ----------               
+OK      Display Virtual Display Driver     ROOT\DISPLAY\0000        
+Unknown         PadDisplay Virtual Display SWD\PADDISPLAY\PADDISPLAY
+
+
+=== PadDisplay scheduled task ===
+
+Folder: \
+HostName:                             DESKTOP-KLO779V
+TaskName:                             \PadDisplay Engine
+Next Run Time:                        N/A
+Status:                               Running
+Logon Mode:                           Interactive only
+Last Run Time:                        07/10/2026 02:14:14
+Last Result:                          267009
+Author:                               N/A
+Task To Run:                          powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "\\wsl$\Ubuntu\home\josh\ipad-display\tools\launch_windows.ps1" -UseSavedSettings
+Start In:                             N/A
+Comment:                              N/A
+Scheduled Task State:                 Enabled
+Idle Time:                            Disabled
+Power Management:                     
+Run As User:                          Josh
+Delete Task If Not Rescheduled:       Disabled
+Stop Task If Runs X Hours and X Mins: Disabled
+Schedule:                             Scheduling data is not available in this format.
+Schedule Type:                        On demand only
+Start Time:                           N/A
+Start Date:                           N/A
+End Date:                             N/A
+Days:                                 N/A
+Months:                               N/A
+Repeat: Every:                        N/A
+Repeat: Until: Time:                  N/A
+Repeat: Until: Duration:              N/A
+Repeat: Stop If Still Running:        N/A
+=== Relevant processes ===
+
+ProcessName           Id StartTime                 CPU
+-----------           -- ---------                 ---
+ffmpeg             93000 07/10/2026 02:14:21 24.328125
+iproxy             85332 07/10/2026 02:14:20  4.109375
+PadDisplayLauncher 58492 07/10/2026 02:18:42  0.390625
+python             24368 07/10/2026 02:14:21   7.21875
+
+
