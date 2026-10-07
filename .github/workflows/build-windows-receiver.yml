@@ -12,6 +12,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: windows-receiver-main
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
@@ -48,4 +52,6 @@ jobs:
             exit 0
           }
           git commit -m "Update prebuilt Windows receiver [skip ci]"
-          git push
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
