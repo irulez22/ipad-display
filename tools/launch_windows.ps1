@@ -37,6 +37,9 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 $ipadIpFallback = "192.168.68.51"
 $statusFile = Join-Path $env:LOCALAPPDATA "PadDisplay\status.json"
+$preferredDisplayName = "\\.\DISPLAY5"
+$preferredDisplayWidth = 1365
+$preferredDisplayHeight = 1024
 $repo = "\\wsl$\Ubuntu\home\josh\ipad-display"
 $streamer = "$repo\tools\stream_windows.py"
 $wasapiSource = "$repo\tools\wasapi_loopback.cpp"
@@ -234,7 +237,35 @@ for ($i=0; $i -lt $screens.Count; $i++) {
   Write-Host ("[{0}] {1} {2}x{3}{4}" -f ($i+1),$s.DeviceName,$s.Bounds.Width,$s.Bounds.Height,$p)
 }
 $defaultScreen=1
-for($i=$screens.Count-1;$i -ge 0;$i--){if(-not $screens[$i].Primary){$defaultScreen=$i+1;break}}
+$preferredScreenIndex = -1
+
+for ($i=0; $i -lt $screens.Count; $i++) {
+  if ($screens[$i].DeviceName -eq $preferredDisplayName) {
+    $preferredScreenIndex = $i
+    break
+  }
+}
+if ($preferredScreenIndex -lt 0) {
+  for ($i=0; $i -lt $screens.Count; $i++) {
+    if ($screens[$i].Bounds.Width -eq $preferredDisplayWidth -and
+        $screens[$i].Bounds.Height -eq $preferredDisplayHeight) {
+      $preferredScreenIndex = $i
+      break
+    }
+  }
+}
+
+if ($preferredScreenIndex -ge 0) {
+  $defaultScreen = $preferredScreenIndex + 1
+  Write-Host ("Auto-selected PadDisplay target: {0} {1}x{2}" -f
+    $screens[$preferredScreenIndex].DeviceName,
+    $screens[$preferredScreenIndex].Bounds.Width,
+    $screens[$preferredScreenIndex].Bounds.Height) -ForegroundColor Green
+} else {
+  for($i=$screens.Count-1;$i -ge 0;$i--){
+    if(-not $screens[$i].Primary){$defaultScreen=$i+1;break}
+  }
+}
 
 $modes=@(
   @{W=1024;H=768;B="4M"},
@@ -244,7 +275,9 @@ $modes=@(
 )
 
 if ($NonInteractive) {
-  if ($DisplayIndex -ge 0 -and $DisplayIndex -lt $screens.Count) {
+  if ($preferredScreenIndex -ge 0) {
+    $screen = $screens[$preferredScreenIndex]
+  } elseif ($DisplayIndex -ge 0 -and $DisplayIndex -lt $screens.Count) {
     $screen = $screens[$DisplayIndex]
   } else {
     $screen = $screens[$defaultScreen-1]
@@ -281,7 +314,15 @@ if ($NonInteractive) {
 $restarted = Ensure-VddMode $mode.W $mode.H $fps
 if ($restarted) {
   $screens = @([System.Windows.Forms.Screen]::AllScreens)
-  $same = $screens | Where-Object { $_.DeviceName -eq $screen.DeviceName } | Select-Object -First 1
+  $same = $screens | Where-Object { $_.DeviceName -eq $preferredDisplayName } | Select-Object -First 1
+  if (-not $same) {
+    $same = $screens | Where-Object {
+      $_.Bounds.Width -eq $preferredDisplayWidth -and $_.Bounds.Height -eq $preferredDisplayHeight
+    } | Select-Object -First 1
+  }
+  if (-not $same) {
+    $same = $screens | Where-Object { $_.DeviceName -eq $screen.DeviceName } | Select-Object -First 1
+  }
   if ($same) { $screen = $same } else { $screen = $screens | Where-Object { -not $_.Primary } | Select-Object -Last 1 }
 }
 Set-DisplayMode $screen.DeviceName $mode.W $mode.H $fps
