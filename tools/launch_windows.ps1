@@ -4,7 +4,8 @@ param(
   [int]$DisplayIndex = -1,
   [string]$Resolution = "1280x960",
   [int]$Fps = 60,
-  [string]$Bitrate = ""
+  [string]$Bitrate = "",
+  [string]$ReceiverHost = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +17,7 @@ if ($UseSavedSettings) {
     if ($saved.Resolution) { $Resolution = [string]$saved.Resolution }
     if ($saved.Fps) { $Fps = [int]$saved.Fps }
     if ($saved.Bitrate) { $Bitrate = [string]$saved.Bitrate }
+    if ($saved.ReceiverHost) { $ReceiverHost = [string]$saved.ReceiverHost }
     $NonInteractive = $true
   }
 }
@@ -30,7 +32,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     $arg += ' -NonInteractive -DisplayIndex ' + $DisplayIndex +
             ' -Resolution "' + $Resolution + '"' +
             ' -Fps ' + $Fps +
-            ' -Bitrate "' + $Bitrate + '"'
+            ' -Bitrate "' + $Bitrate + '"' +
+            ' -ReceiverHost "' + $ReceiverHost + '"'
   }
   Start-Process powershell.exe -Verb RunAs -ArgumentList $arg
   exit 0
@@ -363,8 +366,9 @@ function Stop-StreamerTree($Process) {
 
 while ($true) {
   $usingUsb = $false
+  $usingWindowsReceiver = -not [string]::IsNullOrWhiteSpace($ReceiverHost)
 
-  if (-not $forceWifiNext) {
+  if (-not $usingWindowsReceiver -and -not $forceWifiNext) {
     if (-not $usbProxy -or $usbProxy.HasExited -or -not (Test-TcpPort "127.0.0.1" 4823 250)) {
       $usbProxy = Start-UsbProxy
     }
@@ -376,7 +380,12 @@ while ($true) {
     }
   }
 
-  if (-not $usingUsb) {
+  if ($usingWindowsReceiver) {
+    $forceWifiNext = $false
+    $targetHost = $ReceiverHost
+    $targetPort = 4822
+    Write-Host "Transport: Windows receiver ($targetHost)" -ForegroundColor Green
+  } elseif (-not $usingUsb) {
     $forceWifiNext = $false
     $targetHost = Resolve-PadDisplayHost
     $targetPort = 4822
@@ -400,9 +409,9 @@ while ($true) {
     "--touch-width", [string]$mode.W,
     "--touch-height", [string]$mode.H,
     "--status-file", ("`"" + $statusFile + "`""),
-    "--transport", $(if ($usingUsb) { "USB" } else { "Wi-Fi" })
+    "--transport", $(if ($usingWindowsReceiver) { "Windows" } elseif ($usingUsb) { "USB" } else { "Wi-Fi" })
   )
-  if (-not $usingUsb) {
+  if (-not $usingUsb -and -not $usingWindowsReceiver) {
     $streamArgs += @("--audio-loopback", "`"$audioHelper`"")
   }
   $streamProc = Start-Process -FilePath $pythonExe -ArgumentList $streamArgs -NoNewWindow -PassThru
