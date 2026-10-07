@@ -141,6 +141,8 @@ def status_loop(stats, stop_event, status_file=None, transport="unknown", host="
                 "ipad_device": ipad_hello.get("device"),
                 "ipad_width": ipad_hello.get("width"),
                 "ipad_height": ipad_hello.get("height"),
+                "battery_percent": ipad_hello.get("battery_percent"),
+                "battery_state": ipad_hello.get("battery_state"),
                 "updated_unix": time.time(),
             }
             try:
