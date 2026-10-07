@@ -2,11 +2,27 @@ param([string]$OutputDir = "$env:LOCALAPPDATA\PadDisplayReceiver")
 $ErrorActionPreference = "Stop"
 
 $src = Join-Path $PSScriptRoot "PadDisplayReceiver.cpp"
-$vsDev = "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
 
 if (-not (Test-Path $src)) { throw "Receiver source not found: $src" }
-if (-not (Test-Path $vsDev)) {
-  throw "Visual Studio 2022 Community C++ tools are required. Install Desktop development with C++."
+
+$vsDev = $null
+$vswhere = Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer\vswhere.exe"
+if (-not (Test-Path $vswhere) -and $env:ProgramFiles(x86)) {
+  $vswhere = Join-Path $env:ProgramFiles(x86) "Microsoft Visual Studio\Installer\vswhere.exe"
+}
+if (Test-Path $vswhere) {
+  $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+  if ($install) {
+    $candidate = Join-Path $install "Common7\Tools\VsDevCmd.bat"
+    if (Test-Path $candidate) { $vsDev = $candidate }
+  }
+}
+if (-not $vsDev) {
+  $candidate = "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
+  if (Test-Path $candidate) { $vsDev = $candidate }
+}
+if (-not $vsDev) {
+  throw "Visual Studio 2022 C++ tools are required. Install Desktop development with C++."
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
