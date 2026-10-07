@@ -7,6 +7,8 @@ This is the Windows counterpart to the jailbroken iPad PadDisplay client. It let
 - Listens on TCP 4822 using PadDisplay protocol v1.
 - Receives the existing H.264 stream from the main Windows host.
 - Uses FFmpeg for low-latency H.264 decoding.
+- Runs as a background/tray listener while idle, leaving the laptop desktop fully usable.
+- Opens the remote display window only when the host connects, and hides back to the tray on disconnect.
 - Renders the remote display in a resizable WinForms window.
 - F11 toggles fullscreen; Escape exits fullscreen.
 - Sends mouse down/move/up back to the host using TOUCH_V1, so the laptop can interact with the streamed virtual monitor.
@@ -46,3 +48,10 @@ For example:
 `powershell.exe -ExecutionPolicy Bypass -File tools\launch_windows.ps1 -NonInteractive -ReceiverHost 192.168.68.72`
 
 The selected virtual display, resolution, FPS, bitrate, and touch coordinate mapping remain controlled by the normal PadDisplay host settings.
+
+
+## Laptop-native usage model
+
+The receiver is not a replacement Windows shell. The laptop remains its own normal Windows PC with its own desktop, apps, taskbar, keyboard, networking, and files. PadDisplay Receiver simply adds a remote-display window when the host connects.
+
+For laptop targets, the PadDisplay host automatically selects the 1920x1080 streaming mode when Receiver host is populated. The host virtual display remains an extended monitor on the main PC, while the laptop continues to run its own OS underneath the receiver window.
