@@ -26,3 +26,14 @@ TOUCH_V1 remains accepted by the Windows host as a single-contact compatibility 
 On connection, both endpoints may send CONFIG JSON describing protocol version and supported capabilities. Protocol v1 advertises dedicated audio on TCP 4824 and AUDIO_PCM_V2 support.
 
 AUDIO_PCM_V2 mirrors the Windows default render endpoint while Wi-Fi is active. The dedicated TCP 4824 connection prevents H.264 head-of-line blocking. Sequence numbers expose gaps and the monotonic sender timestamp enables jitter diagnostics. The iPad uses an adaptive AudioQueue prebuffer that starts near 120 ms, increases after underruns, and slowly returns toward the low-latency target after stable playback. USB transport intentionally sends no audio.
+
+
+## Discovery
+
+PadDisplay advertises the video/touch endpoint on the local network with Bonjour/mDNS as `_paddisplay._tcp.local.` on TCP 4822. TXT metadata includes the protocol version, app version/build, and dedicated audio port.
+
+The Windows launcher prefers USB when usbmux is available. For Wi-Fi it first resolves the Bonjour service and verifies TCP 4822. If mDNS resolution is unavailable, it falls back to the configured legacy IP address so discovery failures do not prevent streaming.
+
+## Runtime telemetry
+
+The Windows streamer writes a small JSON status file under `%LOCALAPPDATA%\PadDisplay\status.json`. It contains transport, host, uptime, current video/audio throughput, packet ages, touch count, and the most recent CONFIG handshake received from the iPad. The non-elevated launcher reads this file to display live health without requiring direct IPC with the elevated engine.
