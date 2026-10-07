@@ -27,6 +27,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 @property(nonatomic,strong) NSMutableDictionary *touchIDs;
 @property(nonatomic) uint16_t nextTouchID;
 @property(nonatomic) BOOL videoReady;
+@property(nonatomic,strong) NSTimer *telemetryTimer;
 @end
 
 @implementation DisplayViewController
@@ -38,6 +39,7 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
     self.view.backgroundColor = [UIColor blackColor];
     [UIApplication sharedApplication].idleTimerDisabled = YES;
     self.view.multipleTouchEnabled = YES;
+    [UIDevice currentDevice].batteryMonitoringEnabled = YES;
     self.touchIDs = [NSMutableDictionary dictionary];
     self.nextTouchID = 0;
 
@@ -78,11 +80,24 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 - (BOOL)shouldAutorotate { return YES; }
 
-- (void)streamReceiverDidConnect:(PDStreamReceiver *)receiver
+- (NSString *)batteryStateText
+{
+    switch ([UIDevice currentDevice].batteryState) {
+        case UIDeviceBatteryStateCharging: return @"charging";
+        case UIDeviceBatteryStateFull: return @"full";
+        case UIDeviceBatteryStateUnplugged: return @"unplugged";
+        default: return @"unknown";
+    }
+}
+
+- (NSDictionary *)deviceStatus
 {
     NSString *appVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"unknown";
     NSString *buildVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"unknown";
-    NSDictionary *hello = @{
+    float level = [UIDevice currentDevice].batteryLevel;
+    NSInteger percent = level < 0 ? -1 : (NSInteger)lrintf(level * 100.0f);
+
+    return @{
         @"protocol": @1,
         @"app": appVersion,
         @"build": buildVersion,
@@ -91,8 +106,21 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
         @"width": @((NSInteger)[UIScreen mainScreen].nativeBounds.size.width),
         @"height": @((NSInteger)[UIScreen mainScreen].nativeBounds.size.height),
         @"audio_pcm_v2": @YES,
-        @"audio_port": @4824
+        @"audio_port": @4824,
+        @"battery_percent": @(percent),
+        @"battery_state": [self batteryStateText]
     };
+}
+
+- (void)sendDeviceStatus
+{
+    NSData *data = [NSJSONSerialization dataWithJSONObject:[self deviceStatus] options:0 error:nil];
+    if (data) [self.receiver sendPacketType:PD_PACKET_CONFIG payload:data];
+}
+
+- (void)streamReceiverDidConnect:(PDStreamReceiver *)receiver
+{
+    NSDictionary *hello = [self deviceStatus];
     NSData *helloData = [NSJSONSerialization dataWithJSONObject:hello options:0 error:nil];
     if (helloData) [receiver sendPacketType:PD_PACKET_CONFIG payload:helloData];
 
@@ -100,6 +128,13 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
         PDLog(@"Audio receiver connected; sent protocol hello");
         return;
     }
+
+    [self.telemetryTimer invalidate];
+    self.telemetryTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                           target:self
+                                                         selector:@selector(sendDeviceStatus)
+                                                         userInfo:nil
+                                                          repeats:YES];
 
     PDLog(@"Video/touch receiver connected; sent protocol hello");
     self.videoReady = NO;
@@ -119,6 +154,8 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
     }
 
     PDLog(@"Video/touch receiver disconnected error=%@", error);
+    [self.telemetryTimer invalidate];
+    self.telemetryTimer = nil;
     self.videoReady = NO;
     [self.touchIDs removeAllObjects];
     [self.parser flush];
