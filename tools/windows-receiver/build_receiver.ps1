@@ -6,9 +6,11 @@ $src = Join-Path $PSScriptRoot "PadDisplayReceiver.cpp"
 if (-not (Test-Path $src)) { throw "Receiver source not found: $src" }
 
 $vsDev = $null
-$vswhere = Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path $vswhere) -and $env:ProgramFiles(x86)) {
-  $vswhere = Join-Path $env:ProgramFiles(x86) "Microsoft Visual Studio\Installer\vswhere.exe"
+$programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+$vswhere = if ($programFilesX86) {
+  Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
+} else {
+  Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer\vswhere.exe"
 }
 if (Test-Path $vswhere) {
   $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
