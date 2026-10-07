@@ -26,6 +26,9 @@ class PadDisplayLauncher : Form
     static readonly string StatusFile = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "PadDisplay", "status.json");
+    const string PreferredDisplayName = @"\\.\DISPLAY5";
+    const int PreferredDisplayWidth = 1365;
+    const int PreferredDisplayHeight = 1024;
     const string TaskName = "PadDisplay Engine";
     const string TaskSetup = @"\\wsl$\Ubuntu\home\josh\ipad-display\tools\install_windows_engine_task.ps1";
 
@@ -122,13 +125,33 @@ class PadDisplayLauncher : Form
         p.Controls.Add(bc,3,row);
     }
 
+    int FindPreferredDisplayIndex()
+    {
+        var screens=Screen.AllScreens;
+        for(int i=0;i<screens.Length;i++)
+            if(String.Equals(screens[i].DeviceName, PreferredDisplayName, StringComparison.OrdinalIgnoreCase))
+                return i;
+
+        for(int i=0;i<screens.Length;i++)
+            if(screens[i].Bounds.Width==PreferredDisplayWidth && screens[i].Bounds.Height==PreferredDisplayHeight)
+                return i;
+
+        return -1;
+    }
+
     void PopulateDisplays()
     {
         var screens=Screen.AllScreens;
         for(int i=0;i<screens.Length;i++)
             display.Items.Add(i+": "+screens[i].DeviceName+" "+screens[i].Bounds.Width+"x"+screens[i].Bounds.Height+(screens[i].Primary?" [primary]":""));
-        int pick=0;
-        for(int i=screens.Length-1;i>=0;i--) if(!screens[i].Primary){pick=i;break;}
+
+        int pick=FindPreferredDisplayIndex();
+        if(pick<0)
+        {
+            pick=0;
+            for(int i=screens.Length-1;i>=0;i--) if(!screens[i].Primary){pick=i;break;}
+        }
+
         if(display.Items.Count>0) display.SelectedIndex=pick;
     }
 
@@ -142,8 +165,12 @@ class PadDisplayLauncher : Form
 
     void LoadSettings()
     {
+        int preferred=FindPreferredDisplayIndex();
         int n;
-        if(int.TryParse(ReadReg("DisplayIndex","-1"),out n) && n>=0 && n<display.Items.Count) display.SelectedIndex=n;
+        if(preferred>=0)
+            display.SelectedIndex=preferred;
+        else if(int.TryParse(ReadReg("DisplayIndex","-1"),out n) && n>=0 && n<display.Items.Count)
+            display.SelectedIndex=n;
         string r=ReadReg("Resolution","1280x960");
         resolution.SelectedItem=resolution.Items.Contains(r)?r:"1280x960";
         string f=ReadReg("Fps","60"); fps.SelectedItem=f=="30"?"30":"60";
@@ -158,6 +185,8 @@ class PadDisplayLauncher : Form
         using(var k=Registry.CurrentUser.CreateSubKey(RegPath))
         {
             k.SetValue("DisplayIndex",display.SelectedIndex);
+            if(display.SelectedIndex>=0 && display.SelectedIndex<Screen.AllScreens.Length)
+                k.SetValue("DisplayDeviceName",Screen.AllScreens[display.SelectedIndex].DeviceName);
             k.SetValue("Resolution",Convert.ToString(resolution.SelectedItem));
             k.SetValue("Fps",Convert.ToString(fps.SelectedItem));
             k.SetValue("Bitrate",bitrate.Text.Trim());
