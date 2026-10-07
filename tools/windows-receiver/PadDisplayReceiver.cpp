@@ -6,6 +6,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <d3d11.h>
+#include <d3d10.h>
 #include <dxgi1_2.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -120,6 +121,14 @@ public:
             levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
             &device_, &actual, &context_);
         if (FAILED(hr)) return hr;
+
+        // Presentation runs on the receiver/network thread while window
+        // resize messages are handled on the UI thread. Protect the D3D11
+        // immediate context so those operations cannot race each other.
+        ComPtr<ID3D10Multithread> multithread;
+        if (SUCCEEDED(context_.As(&multithread))) {
+            multithread->SetMultithreadProtected(TRUE);
+        }
 
         ComPtr<IDXGIDevice> dxgiDevice;
         hr = device_.As(&dxgiDevice);
@@ -239,7 +248,13 @@ public:
 
         hr = videoContext_->VideoProcessorBlt(processor_.Get(), outView.Get(), 0, 1, &stream);
         if (FAILED(hr)) return hr;
-        return swapChain_->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+
+        // Do not use DXGI_PRESENT_DO_NOT_WAIT here. The iPad client applies
+        // presentation backpressure rather than intentionally dropping frames,
+        // and the Windows receiver should do the same. Present at the display
+        // refresh interval so the decoder naturally blocks instead of racing
+        // ahead of the swap chain and freezing on DXGI_ERROR_WAS_STILL_DRAWING.
+        return swapChain_->Present(1, 0);
     }
 
 private:
@@ -350,7 +365,8 @@ public:
 
         hr = decoder_->ProcessInput(0, sample.Get(), 0);
         if (hr == MF_E_NOTACCEPTING) {
-            Drain();
+            HRESULT drainHr = Drain();
+            if (FAILED(drainHr)) return drainHr;
             hr = decoder_->ProcessInput(0, sample.Get(), 0);
         }
         if (FAILED(hr)) return hr;
@@ -400,7 +416,11 @@ private:
             if (FAILED(hr)) return hr;
 
             if (out.pSample) {
-                presenter_->PresentSample(out.pSample);
+                HRESULT presentHr = presenter_->PresentSample(out.pSample);
+                if (FAILED(presentHr)) {
+                    if (out.pEvents) out.pEvents->Release();
+                    return presentHr;
+                }
             }
             if (out.pEvents) out.pEvents->Release();
         }
