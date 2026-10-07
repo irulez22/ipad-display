@@ -35,7 +35,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
   Start-Process powershell.exe -Verb RunAs -ArgumentList $arg
   exit 0
 }
-$ipadIp = "192.168.68.51"
+$ipadIpFallback = "192.168.68.51"
+$statusFile = Join-Path $env:LOCALAPPDATA "PadDisplay\status.json"
 $repo = "\\wsl$\Ubuntu\home\josh\ipad-display"
 $streamer = "$repo\tools\stream_windows.py"
 $wasapiSource = "$repo\tools\wasapi_loopback.cpp"
@@ -79,6 +80,33 @@ function Test-TcpPort($HostName, $Port, $TimeoutMs=400) {
     $client.EndConnect($iar)
     return $true
   } catch { return $false } finally { $client.Close() }
+}
+
+function Resolve-PadDisplayHost {
+  try {
+    $ptrs = @(Resolve-DnsName -Name "_paddisplay._tcp.local" -Type PTR -ErrorAction Stop)
+    foreach ($ptr in $ptrs) {
+      if (-not $ptr.NameHost) { continue }
+      $srvs = @(Resolve-DnsName -Name $ptr.NameHost -Type SRV -ErrorAction Stop)
+      foreach ($srv in $srvs) {
+        if (-not $srv.NameTarget) { continue }
+        $addresses = @(Resolve-DnsName -Name $srv.NameTarget -Type A -ErrorAction Stop)
+        foreach ($address in $addresses) {
+          if ($address.IPAddress -and (Test-TcpPort $address.IPAddress 4822 500)) {
+            Write-Host ("Discovery: Bonjour found PadDisplay at {0}" -f $address.IPAddress) -ForegroundColor Green
+            return [string]$address.IPAddress
+          }
+        }
+      }
+    }
+  } catch {
+    Write-Host "Discovery: Bonjour lookup unavailable; using fallback address." -ForegroundColor DarkGray
+  }
+
+  if (Test-TcpPort $ipadIpFallback 4822 500) {
+    Write-Host ("Discovery: fallback PadDisplay address {0}" -f $ipadIpFallback) -ForegroundColor DarkGray
+  }
+  return $ipadIpFallback
 }
 
 function Get-UsbDeviceUdid {
@@ -309,9 +337,9 @@ while ($true) {
 
   if (-not $usingUsb) {
     $forceWifiNext = $false
-    $targetHost = $ipadIp
+    $targetHost = Resolve-PadDisplayHost
     $targetPort = 4822
-    Write-Host "Transport: Wi-Fi fallback ($ipadIp)" -ForegroundColor Cyan
+    Write-Host "Transport: Wi-Fi ($targetHost)" -ForegroundColor Cyan
     $audioHelper = Ensure-WasapiHelper
     Write-Host "Audio: Wi-Fi mirror enabled" -ForegroundColor Cyan
   }
@@ -329,7 +357,9 @@ while ($true) {
     "--touch-left", [string]$screen.Bounds.X,
     "--touch-top", [string]$screen.Bounds.Y,
     "--touch-width", [string]$mode.W,
-    "--touch-height", [string]$mode.H
+    "--touch-height", [string]$mode.H,
+    "--status-file", ("`"" + $statusFile + "`""),
+    "--transport", $(if ($usingUsb) { "USB" } else { "Wi-Fi" })
   )
   if (-not $usingUsb) {
     $streamArgs += @("--audio-loopback", "`"$audioHelper`"")
