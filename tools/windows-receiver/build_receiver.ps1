@@ -1,6 +1,6 @@
 param([string]$OutputDir = "$env:LOCALAPPDATA\PadDisplayReceiver")
 $ErrorActionPreference = "Stop"
-$src = "\\wsl$\Ubuntu\home\josh\ipad-display\tools\windows-receiver\PadDisplayReceiver.cs"
+$src = Join-Path $PSScriptRoot "PadDisplayReceiver.cs"
 $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path $csc)) { throw "C# compiler not found: $csc" }
 if (-not (Test-Path $src)) { throw "Receiver source not found: $src" }
