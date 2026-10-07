@@ -59,11 +59,15 @@ class PadDisplayLauncher : Form
 
         display.DropDownStyle = ComboBoxStyle.DropDownList; display.Dock = DockStyle.Fill;
         resolution.DropDownStyle = ComboBoxStyle.DropDownList; resolution.Dock = DockStyle.Fill;
-        resolution.Items.AddRange(new object[] {"1024x768","1280x960","1600x1200","2048x1536"});
+        resolution.Items.AddRange(new object[] {"1024x768","1280x960","1600x1200","1920x1080","2048x1536"});
         fps.DropDownStyle = ComboBoxStyle.DropDownList; fps.Dock = DockStyle.Fill;
         fps.Items.AddRange(new object[] {"60","30"});
         bitrate.Dock = DockStyle.Fill;
         receiverHost.Dock = DockStyle.Fill;
+        receiverHost.TextChanged += delegate {
+            if(!String.IsNullOrWhiteSpace(receiverHost.Text))
+                resolution.SelectedItem = "1920x1080";
+        };
 
         AddRow(top,0,"Display",display,"Resolution",resolution);
         AddRow(top,1,"FPS",fps,"Bitrate",bitrate);
@@ -96,7 +100,7 @@ class PadDisplayLauncher : Form
 
         resolution.SelectedIndexChanged += delegate {
             string r = Convert.ToString(resolution.SelectedItem);
-            bitrate.Text = r=="1024x768"?"4M":r=="1280x960"?"6M":r=="1600x1200"?"10M":"16M";
+            bitrate.Text = r=="1024x768"?"4M":r=="1280x960"?"6M":r=="1600x1200"?"10M":r=="1920x1080"?"12M":"16M";
         };
         start.Click += delegate { StartEngine(); };
         stop.Click += delegate { StopEngine(); };
@@ -180,6 +184,8 @@ class PadDisplayLauncher : Form
         string f=ReadReg("Fps","60"); fps.SelectedItem=f=="30"?"30":"60";
         bitrate.Text=ReadReg("Bitrate","6M");
         receiverHost.Text=ReadReg("ReceiverHost","");
+        if(!String.IsNullOrWhiteSpace(receiverHost.Text))
+            resolution.SelectedItem="1920x1080";
         startup.Checked=ReadReg("StartWithWindows","False")=="True";
         autostart.Checked=ReadReg("AutoStartStream","False")=="True";
         minimized.Checked=ReadReg("StartMinimized","False")=="True";
