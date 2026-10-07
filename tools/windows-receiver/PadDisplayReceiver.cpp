@@ -54,6 +54,12 @@ static SOCKET g_client = INVALID_SOCKET;
 static std::mutex g_sendMutex;
 static int g_streamWidth = 1366;
 static int g_streamHeight = 768;
+static std::atomic<uint64_t> g_videoPackets{0};
+static std::atomic<uint64_t> g_videoBytes{0};
+static std::atomic<uint64_t> g_accessUnits{0};
+static std::atomic<uint64_t> g_decodedFrames{0};
+static std::atomic<uint64_t> g_presentedFrames{0};
+static std::atomic<unsigned long> g_lastHr{0};
 
 static std::wstring Utf8ToWide(const std::string& s) {
     if (s.empty()) return L"";
@@ -215,7 +221,10 @@ public:
         if (inDesc.Width != lastInW_ || inDesc.Height != lastInH_) {
             lastInW_ = inDesc.Width; lastInH_ = inDesc.Height;
             hr = CreateVideoProcessor((int)inDesc.Width, (int)inDesc.Height);
-            if (FAILED(hr)) return hr;
+            if (FAILED(hr)) {
+                g_lastHr = (unsigned long)hr;
+                return hr;
+            }
         }
 
         D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inViewDesc{};
@@ -254,7 +263,13 @@ public:
         // and the Windows receiver should do the same. Present at the display
         // refresh interval so the decoder naturally blocks instead of racing
         // ahead of the swap chain and freezing on DXGI_ERROR_WAS_STILL_DRAWING.
-        return swapChain_->Present(1, 0);
+        hr = swapChain_->Present(1, 0);
+        if (SUCCEEDED(hr)) {
+            ++g_presentedFrames;
+        } else {
+            g_lastHr = (unsigned long)hr;
+        }
+        return hr;
     }
 
 private:
@@ -281,30 +296,15 @@ public:
         hr = deviceManager_->ResetDevice(presenter_->Device(), resetToken_);
         if (FAILED(hr)) return hr;
 
-        IMFActivate** activates = nullptr;
-        UINT32 count = 0;
-        MFT_REGISTER_TYPE_INFO inputInfo{MFMediaType_Video, MFVideoFormat_H264};
-        MFT_REGISTER_TYPE_INFO outputInfo{MFMediaType_Video, MFVideoFormat_NV12};
-
-        hr = MFTEnumEx(
-            MFT_CATEGORY_VIDEO_DECODER,
-            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-            &inputInfo, &outputInfo, &activates, &count);
-
-        if (SUCCEEDED(hr) && count > 0) {
-            hr = activates[0]->ActivateObject(IID_PPV_ARGS(&decoder_));
-        } else {
-            hr = CoCreateInstance(
-                CLSID_CMSH264DecoderMFT,
-                nullptr,
-                CLSCTX_INPROC_SERVER,
-                IID_PPV_ARGS(&decoder_));
-        }
-
-        if (activates) {
-            for (UINT32 i = 0; i < count; ++i) activates[i]->Release();
-            CoTaskMemFree(activates);
-        }
+        // Use the Microsoft H.264 decoder directly. It is a synchronous MFT
+        // that supports DXVA through MFT_MESSAGE_SET_D3D_MANAGER, avoiding
+        // vendor-specific asynchronous hardware-MFT behavior while still
+        // allowing GPU-backed decode surfaces when the driver supports them.
+        hr = CoCreateInstance(
+            CLSID_CMSH264DecoderMFT,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&decoder_));
         if (FAILED(hr)) return hr;
 
         // The Microsoft H.264 decoder may not be registered as a hardware MFT
@@ -343,6 +343,7 @@ public:
 
     HRESULT FeedAccessUnit(const uint8_t* data, size_t len) {
         if (!decoder_ || len == 0) return S_OK;
+        ++g_accessUnits;
 
         ComPtr<IMFMediaBuffer> buffer;
         HRESULT hr = MFCreateMemoryBuffer((DWORD)len, &buffer);
@@ -416,6 +417,7 @@ private:
             if (FAILED(hr)) return hr;
 
             if (out.pSample) {
+                ++g_decodedFrames;
                 HRESULT presentHr = presenter_->PresentSample(out.pSample);
                 if (FAILED(presentHr)) {
                     if (out.pEvents) out.pEvents->Release();
@@ -490,6 +492,44 @@ static void SendHello() {
     SendPacket(CONFIG, reinterpret_cast<const uint8_t*>(hello.data()), (uint32_t)hello.size());
 }
 
+static void DiagnosticsThread() {
+    uint64_t lastPackets = 0, lastAU = 0, lastDecoded = 0, lastPresented = 0;
+    while (g_running) {
+        Sleep(1000);
+        if (!g_connected) continue;
+
+        uint64_t packets = g_videoPackets.load();
+        uint64_t bytes = g_videoBytes.load();
+        uint64_t aus = g_accessUnits.load();
+        uint64_t decoded = g_decodedFrames.load();
+        uint64_t presented = g_presentedFrames.load();
+        unsigned long hr = g_lastHr.load();
+
+        wchar_t line[320];
+        swprintf_s(
+            line,
+            L"PadDisplay | net %llu pkt / %.2f MB | AU %llu | dec %llu | present %llu | +%llu/%llu/%llu/%llu | hr 0x%08lX",
+            (unsigned long long)packets,
+            (double)bytes / (1024.0 * 1024.0),
+            (unsigned long long)aus,
+            (unsigned long long)decoded,
+            (unsigned long long)presented,
+            (unsigned long long)(packets - lastPackets),
+            (unsigned long long)(aus - lastAU),
+            (unsigned long long)(decoded - lastDecoded),
+            (unsigned long long)(presented - lastPresented),
+            hr);
+        SetWindowTextW(g_hwnd, line);
+        OutputDebugStringW(line);
+        OutputDebugStringW(L"\n");
+
+        lastPackets = packets;
+        lastAU = aus;
+        lastDecoded = decoded;
+        lastPresented = presented;
+    }
+}
+
 static void NetworkThread() {
     SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSock == INVALID_SOCKET) return;
@@ -517,6 +557,12 @@ static void NetworkThread() {
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
         g_client = s;
         g_connected = true;
+        g_videoPackets = 0;
+        g_videoBytes = 0;
+        g_accessUnits = 0;
+        g_decodedFrames = 0;
+        g_presentedFrames = 0;
+        g_lastHr = 0;
         SendHello();
         PostMessage(g_hwnd, WM_APP_STATUS, 0, (LPARAM)_wcsdup(L"Host connected\nWaiting for stream..."));
 
@@ -549,6 +595,8 @@ static void NetworkThread() {
                     }
                 }
             } else if (type == VIDEO_H264) {
+                ++g_videoPackets;
+                g_videoBytes += payload.size();
                 if (!g_decoder) {
                     auto decoder = std::make_unique<H264Decoder>();
                     HRESULT hr = decoder->Initialize(&g_presenter, g_streamWidth, g_streamHeight);
@@ -716,6 +764,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     SetForegroundWindow(g_hwnd);
 
     std::thread network(NetworkThread);
+    std::thread diagnostics(DiagnosticsThread);
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -726,6 +775,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     g_running = false;
     if (g_client != INVALID_SOCKET) shutdown(g_client, SD_BOTH);
     if (network.joinable()) network.join();
+    if (diagnostics.joinable()) diagnostics.join();
 
     MFShutdown();
     CoUninitialize();
