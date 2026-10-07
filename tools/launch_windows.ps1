@@ -274,10 +274,14 @@ $modes=@(
   @{W=1024;H=768;B="4M"},
   @{W=1280;H=960;B="6M"},
   @{W=1600;H=1200;B="10M"},
+  @{W=1920;H=1080;B="12M"},
   @{W=2048;H=1536;B="16M"}
 )
 
 if ($NonInteractive) {
+  if (-not [string]::IsNullOrWhiteSpace($ReceiverHost)) {
+    $Resolution = "1920x1080"
+  }
   if ($preferredScreenIndex -ge 0) {
     $screen = $screens[$preferredScreenIndex]
   } elseif ($DisplayIndex -ge 0 -and $DisplayIndex -lt $screens.Count) {
@@ -304,8 +308,9 @@ if ($NonInteractive) {
   Write-Host "[1] 1024x768   4M"
   Write-Host "[2] 1280x960   6M"
   Write-Host "[3] 1600x1200 10M"
-  Write-Host "[4] 2048x1536 16M (native iPad Air)"
-  $mode=$modes[(Read-Choice "Resolution" 2 1 4)-1]
+  Write-Host "[4] 1920x1080 12M (Windows receiver)"
+  Write-Host "[5] 2048x1536 16M (native iPad Air)"
+  $mode=$modes[(Read-Choice "Resolution" $(if ([string]::IsNullOrWhiteSpace($ReceiverHost)) { 2 } else { 4 }) 1 5)-1]
 
   Write-Host "[1] 60 fps"
   Write-Host "[2] 30 fps"
