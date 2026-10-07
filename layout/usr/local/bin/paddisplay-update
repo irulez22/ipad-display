@@ -24,7 +24,17 @@ rm -f /var/mobile/Library/PadDisplayUpdateNow 2>/dev/null || true
 rm -rf "$TMP"
 mkdir -p "$TMP"
 
-FETCH=""
+STAGED_DEB="/var/mobile/Library/PadDisplayUpdate.deb"
+STAGED_SHA="/var/mobile/Library/PadDisplayUpdate.deb.sha256"
+DEB="$TMP/PadDisplay.deb"
+SHA="$TMP/PadDisplay.deb.sha256"
+
+if [ -f "$STAGED_DEB" ] && [ -f "$STAGED_SHA" ]; then
+  log "using staged desktop package"
+  cp "$STAGED_DEB" "$DEB"
+  cp "$STAGED_SHA" "$SHA"
+else
+  FETCH=""
 if command -v curl >/dev/null 2>&1; then
   FETCH="curl"
 elif command -v wget >/dev/null 2>&1; then
@@ -60,9 +70,6 @@ if [ -z "$DEB_URL" ] || [ -z "$SHA_URL" ]; then
   exit 0
 fi
 
-DEB="$TMP/PadDisplay.deb"
-SHA="$TMP/PadDisplay.deb.sha256"
-
 if ! fetch_to "$DEB_URL" "$DEB"; then
   log "failed to download deb"
   exit 0
@@ -70,6 +77,7 @@ fi
 if ! fetch_to "$SHA_URL" "$SHA"; then
   log "failed to download sha256"
   exit 0
+fi
 fi
 
 EXPECTED="$(awk 'NR==1 {print $1}' "$SHA" | tr 'A-F' 'a-f')"
@@ -120,4 +128,5 @@ sleep 2
 if [ -x /usr/bin/uiopen ]; then
   su mobile -c "/usr/bin/uiopen paddisplay://" >/dev/null 2>&1 || true
 fi
+rm -f "$STAGED_DEB" "$STAGED_SHA" 2>/dev/null || true
 log "update to $NEW_VERSION complete"
