@@ -75,3 +75,31 @@ Allow TCP 4822 through Windows Firewall when prompted.
 Set **Receiver host** in the normal PadDisplay launcher to the receiver laptop hostname or LAN IP. Leave it blank for normal iPad USB/Wi-Fi operation.
 
 When Receiver host is populated, the host stays pinned to that Windows receiver and selects 1366x768 by default.
+
+
+## Prebuilt executable
+
+The normal laptop path does **not** require Visual Studio or C++ build tools.
+
+GitHub Actions builds the native receiver on a Windows runner and commits:
+
+```text
+tools/windows-receiver/bin/PadDisplayReceiver.exe
+tools/windows-receiver/bin/PadDisplayReceiver.exe.sha256
+```
+
+After the workflow completes, the receiver laptop only needs:
+
+```bat
+git pull
+tools\windows-receiver\run_receiver.bat
+```
+
+`run_receiver.bat` prefers the prebuilt EXE. A local C++ build is only a fallback if the prebuilt binary is missing.
+
+To verify it manually:
+
+```powershell
+Get-FileHash tools\windows-receiver\bin\PadDisplayReceiver.exe -Algorithm SHA256
+Get-Content tools\windows-receiver\bin\PadDisplayReceiver.exe.sha256
+```
