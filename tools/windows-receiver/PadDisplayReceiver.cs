@@ -22,6 +22,7 @@ class PadDisplayReceiver : Form
     readonly Label status = new Label();
     readonly Button fullscreen = new Button();
     readonly Button stop = new Button();
+    readonly NotifyIcon tray = new NotifyIcon();
     TcpListener listener;
     TcpClient client;
     NetworkStream stream;
@@ -49,6 +50,7 @@ class PadDisplayReceiver : Form
     PadDisplayReceiver()
     {
         Text = "PadDisplay Receiver";
+        ShowInTaskbar = false;
         Width = 1100;
         Height = 760;
         MinimumSize = new Size(640, 480);
@@ -102,10 +104,23 @@ class PadDisplayReceiver : Form
                 ToggleFullscreen(); e.Handled = true;
             }
         };
-        FormClosing += delegate {
-            running = false;
-            DisconnectClient();
-            try { if (listener != null) listener.Stop(); } catch {}
+        tray.Icon = SystemIcons.Application;
+        tray.Text = "PadDisplay Receiver";
+        tray.Visible = true;
+        var trayMenu = new ContextMenuStrip();
+        trayMenu.Items.Add("Open", null, delegate { ShowReceiverWindow(); });
+        trayMenu.Items.Add("Disconnect", null, delegate { DisconnectClient(); });
+        trayMenu.Items.Add("Exit", null, delegate { ExitReceiver(); });
+        tray.ContextMenuStrip = trayMenu;
+        tray.DoubleClick += delegate { ShowReceiverWindow(); };
+
+        Shown += delegate { Hide(); };
+        FormClosing += delegate(object sender, FormClosingEventArgs e) {
+            if (running) {
+                e.Cancel = true;
+                Hide();
+                ShowInTaskbar = false;
+            }
         };
 
         acceptThread = new Thread(AcceptLoop);
@@ -133,6 +148,7 @@ class PadDisplayReceiver : Form
                 SetStopEnabled(true);
                 SetStatus("Host connected - waiting for CONFIG...");
                 SetOverlay("Host connected\r\nWaiting for stream...");
+                ShowReceiverWindow();
                 SendHello();
 
                 receiveThread = new Thread(ReceiveLoop);
@@ -355,6 +371,7 @@ class PadDisplayReceiver : Form
         if (running) {
             SetStatus("Listening on TCP 4822...");
             SetOverlay("PadDisplay Receiver\r\n\r\nWaiting for host connection on TCP 4822...");
+            HideReceiverWindow();
         }
     }
 
@@ -370,6 +387,34 @@ class PadDisplayReceiver : Form
         }
         catch {}
         decoder = null;
+    }
+
+    void ShowReceiverWindow()
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke((Action)ShowReceiverWindow); return; }
+        ShowInTaskbar = true;
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+    }
+
+    void HideReceiverWindow()
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke((Action)HideReceiverWindow); return; }
+        Hide();
+        ShowInTaskbar = false;
+    }
+
+    void ExitReceiver()
+    {
+        running = false;
+        try { if (listener != null) listener.Stop(); } catch {}
+        DisconnectClient();
+        tray.Visible = false;
+        if (InvokeRequired) { BeginInvoke((Action)delegate { Application.Exit(); }); }
+        else Application.Exit();
     }
 
     void ToggleFullscreen()
