@@ -444,7 +444,7 @@ while ($true) {
     if ($evt) {
       Remove-Event -EventIdentifier $evt.EventIdentifier -ErrorAction SilentlyContinue
 
-      if (-not $usingUsb) {
+      if (-not $usingUsb -and -not $usingWindowsReceiver) {
         if ($usbProxy -and -not $usbProxy.HasExited) {
           $usbProxy | Stop-Process -Force -ErrorAction SilentlyContinue
           $usbProxy = $null
@@ -476,7 +476,10 @@ while ($true) {
     exit 0
   }
 
-  if ($usingUsb) {
+  if ($usingWindowsReceiver) {
+    Write-Host ""
+    Write-Host "Windows receiver stream dropped; reconnecting to $ReceiverHost..." -ForegroundColor Yellow
+  } elseif ($usingUsb) {
     Write-Host ""
     Write-Host "USB stream dropped; falling back to Wi-Fi..." -ForegroundColor Yellow
     if ($usbProxy -and -not $usbProxy.HasExited) { $usbProxy | Stop-Process -Force -ErrorAction SilentlyContinue }
