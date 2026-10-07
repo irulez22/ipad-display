@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using System.Text.RegularExpressions;
 
 class PadDisplayLauncher : Form
 {
@@ -20,7 +21,11 @@ class PadDisplayLauncher : Form
     TextBox log = new TextBox();
     Label status = new Label();
     NotifyIcon tray;
+    Timer telemetryTimer = new Timer();
     const string RegPath = @"Software\PadDisplay";
+    static readonly string StatusFile = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "PadDisplay", "status.json");
     const string TaskName = "PadDisplay Engine";
     const string TaskSetup = @"\\wsl$\Ubuntu\home\josh\ipad-display\tools\install_windows_engine_task.ps1";
 
@@ -71,13 +76,16 @@ class PadDisplayLauncher : Form
         buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(save);
         top.Controls.Add(buttons,2,3); top.SetColumnSpan(buttons,2);
 
-        status.Text="Stopped"; status.Dock=DockStyle.Top; status.Height=28; status.Padding=new Padding(12,5,0,0);
+        status.Text="Stopped"; status.Dock=DockStyle.Top; status.Height=50; status.Padding=new Padding(12,5,0,0);
         log.Dock=DockStyle.Fill; log.Multiline=true; log.ReadOnly=true; log.ScrollBars=ScrollBars.Vertical;
         log.Font=new Font("Consolas",9); log.BackColor=Color.Black; log.ForeColor=Color.Gainsboro;
 
         Controls.Add(log); Controls.Add(status); Controls.Add(top);
 
         PopulateDisplays(); LoadSettings();
+        telemetryTimer.Interval = 1000;
+        telemetryTimer.Tick += delegate { UpdateTelemetry(); };
+        telemetryTimer.Start();
 
         resolution.SelectedIndexChanged += delegate {
             string r = Convert.ToString(resolution.SelectedItem);
@@ -217,6 +225,7 @@ class PadDisplayLauncher : Form
     void StartEngine()
     {
         SaveSettings();
+        try { if(File.Exists(StatusFile)) File.Delete(StatusFile); } catch {}
         if(!EnsureEngineTask()) return;
         try
         {
@@ -245,10 +254,68 @@ class PadDisplayLauncher : Form
             p.WaitForExit();
         }
         catch {}
+        try { if(File.Exists(StatusFile)) File.Delete(StatusFile); } catch {}
         status.Text="Stopped";
         start.Enabled=true;
         stop.Enabled=false;
         Append("PadDisplay engine stopped.");
+    }
+
+    string JsonValue(string json, string key)
+    {
+        var match = Regex.Match(
+            json,
+            "\\"" + Regex.Escape(key) + "\\"\\s*:\\s*(?:\\\"(?<s>[^\\\"]*)\\\"|(?<n>-?[0-9]+(?:\\.[0-9]+)?)|null)");
+        if(!match.Success) return "";
+        if(match.Groups["s"].Success) return match.Groups["s"].Value;
+        if(match.Groups["n"].Success) return match.Groups["n"].Value;
+        return "";
+    }
+
+    void UpdateTelemetry()
+    {
+        try
+        {
+            if(!File.Exists(StatusFile)) return;
+            if((DateTime.UtcNow - File.GetLastWriteTimeUtc(StatusFile)).TotalSeconds > 5)
+            {
+                status.Text = "Engine running • telemetry stale";
+                return;
+            }
+
+            string json = File.ReadAllText(StatusFile);
+            string transport = JsonValue(json, "transport");
+            string host = JsonValue(json, "host");
+            string video = JsonValue(json, "video_mbps");
+            string audio = JsonValue(json, "audio_kbps");
+            string app = JsonValue(json, "ipad_app");
+            string build = JsonValue(json, "ipad_build");
+            string protocol = JsonValue(json, "protocol");
+            string name = JsonValue(json, "ipad_name");
+
+            string device = String.IsNullOrEmpty(name) ? "iPad" : name;
+            string version = String.IsNullOrEmpty(app) ? "waiting for handshake" :
+                ("v" + app + (String.IsNullOrEmpty(build) ? "" : " (" + build + ")"));
+            string health = (!String.IsNullOrEmpty(protocol) && protocol != "1")
+                ? " • PROTOCOL MISMATCH"
+                : "";
+
+            status.Text = String.Format(
+                "{0} • {1} {2} • {3}\r\nVideo {4} Mbps • Audio {5} kbps{6}",
+                device,
+                String.IsNullOrEmpty(transport) ? "?" : transport,
+                String.IsNullOrEmpty(host) ? "" : host,
+                version,
+                String.IsNullOrEmpty(video) ? "0" : video,
+                String.IsNullOrEmpty(audio) ? "0" : audio,
+                health);
+            start.Enabled=false;
+            stop.Enabled=true;
+        }
+        catch
+        {
+            // Status is best-effort; never break the launcher over telemetry.
+        }
     }
 
     void Append(string text)
