@@ -89,11 +89,28 @@ if [ "${PADDISPLAY_NO_DEVICE_TRIGGER:-0}" != "1" ]; then
   echo
   echo "==> Triggering immediate iPad update..."
   ssh ipad 'touch /var/mobile/Library/PadDisplayUpdateNow'
-  echo "==> iPad updater triggered. It will install v$version if the release is newer."
+  echo "==> Waiting for iPad to report v$version..."
+
+  installed=""
+  for i in $(seq 1 30); do
+    sleep 2
+    installed="$(ssh ipad 'dpkg-query -W -f="\${Version}" com.ipaddisplay.client 2>/dev/null || true' 2>/dev/null || true)"
+    if [ "$installed" = "$version" ]; then
+      echo "==> iPad update verified: $installed"
+      break
+    fi
+  done
+
+  if [ "$installed" != "$version" ]; then
+    echo "ERROR: iPad did not update to $version (still reports: ${installed:-unknown})." >&2
+    echo "==> Last updater log lines:" >&2
+    ssh ipad 'tail -n 40 /var/mobile/Library/PadDisplayUpdater/update.log 2>/dev/null || true' >&2 || true
+    exit 1
+  fi
 else
   echo
   echo "==> Immediate iPad update trigger disabled by PADDISPLAY_NO_DEVICE_TRIGGER=1"
 fi
 
 echo
-echo "==> All update steps complete."
+echo "==> All update steps complete and verified."
