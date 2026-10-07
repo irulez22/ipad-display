@@ -5,6 +5,7 @@
 #include <windowsx.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mmsystem.h>
 #include <d3d11.h>
 #include <d3d10.h>
 #include <dxgi1_2.h>
@@ -41,6 +42,7 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "wmcodecdspuuid.lib")
+#pragma comment(lib, "winmm.lib")
 
 using Microsoft::WRL::ComPtr;
 
@@ -51,6 +53,8 @@ static constexpr uint8_t TOUCH_V1 = 0x10;
 static constexpr uint8_t TOUCH_V2 = 0x11;
 static constexpr uint8_t MOUSE_V1 = 0x12;
 static constexpr uint8_t KEYBOARD_V1 = 0x13;
+static constexpr uint8_t AUDIO_PCM = 0x20;
+static constexpr uint8_t AUDIO_PCM_V2 = 0x21;
 static constexpr UINT WM_APP_FRAME = WM_APP + 1;
 static constexpr UINT WM_APP_STATUS = WM_APP + 2;
 
@@ -75,8 +79,11 @@ static std::atomic<uint64_t> g_auQueueHighWater{0};
 static std::atomic<uint64_t> g_presentQueueHighWater{0};
 static std::atomic<uint64_t> g_decodeStalls{0};
 static std::atomic<uint64_t> g_presentStalls{0};
+static std::atomic<uint64_t> g_audioPackets{0};
+static std::atomic<uint64_t> g_audioBytes{0};
+static std::atomic<uint64_t> g_audioErrors{0};
 
-static constexpr size_t AU_QUEUE_MAX = 4;
+static constexpr size_t AU_QUEUE_MAX = 2;
 static constexpr size_t PRESENT_QUEUE_MAX = 1;
 
 static std::mutex g_auMutex;
@@ -237,6 +244,73 @@ static int JsonInt(const std::string& json, const char* key, int fallback) {
     }
     return any ? (neg ? -v : v) : fallback;
 }
+
+class PcmAudioPlayer {
+public:
+    HRESULT Initialize() {
+        WAVEFORMATEX fmt{};
+        fmt.wFormatTag = WAVE_FORMAT_PCM;
+        fmt.nChannels = 2;
+        fmt.nSamplesPerSec = 48000;
+        fmt.wBitsPerSample = 16;
+        fmt.nBlockAlign = fmt.nChannels * (fmt.wBitsPerSample / 8);
+        fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
+
+        MMRESULT mm = waveOutOpen(&wave_, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL);
+        if (mm != MMSYSERR_NOERROR) return HRESULT_FROM_WIN32(mm);
+
+        blocks_.resize(6);
+        headers_.resize(6);
+        return S_OK;
+    }
+
+    ~PcmAudioPlayer() {
+        Shutdown();
+    }
+
+    HRESULT Submit(const uint8_t* pcm, size_t bytes) {
+        if (!wave_ || !pcm || bytes == 0) return E_INVALIDARG;
+
+        size_t index = next_++ % headers_.size();
+        WAVEHDR& hdr = headers_[index];
+
+        if (hdr.dwFlags & WHDR_PREPARED) {
+            while (!(hdr.dwFlags & WHDR_DONE) && g_running) {
+                Sleep(1);
+            }
+            waveOutUnprepareHeader(wave_, &hdr, sizeof(hdr));
+            ZeroMemory(&hdr, sizeof(hdr));
+        }
+
+        blocks_[index].assign(pcm, pcm + bytes);
+        hdr.lpData = reinterpret_cast<LPSTR>(blocks_[index].data());
+        hdr.dwBufferLength = static_cast<DWORD>(blocks_[index].size());
+
+        MMRESULT mm = waveOutPrepareHeader(wave_, &hdr, sizeof(hdr));
+        if (mm != MMSYSERR_NOERROR) return HRESULT_FROM_WIN32(mm);
+        mm = waveOutWrite(wave_, &hdr, sizeof(hdr));
+        if (mm != MMSYSERR_NOERROR) return HRESULT_FROM_WIN32(mm);
+        return S_OK;
+    }
+
+    void Shutdown() {
+        if (!wave_) return;
+        waveOutReset(wave_);
+        for (auto& hdr : headers_) {
+            if (hdr.dwFlags & WHDR_PREPARED) {
+                waveOutUnprepareHeader(wave_, &hdr, sizeof(hdr));
+            }
+        }
+        waveOutClose(wave_);
+        wave_ = nullptr;
+    }
+
+private:
+    HWAVEOUT wave_ = nullptr;
+    std::vector<std::vector<uint8_t>> blocks_;
+    std::vector<WAVEHDR> headers_;
+    size_t next_ = 0;
+};
 
 class D3DPresenter {
 public:
@@ -886,12 +960,115 @@ static void DiagnosticsThread() {
              (unsigned long long)g_decoderErrors.load(),
              (unsigned long long)g_reconnects.load(),
              hr);
+        Logf(L"audio packets=%llu bytes=%llu errors=%llu",
+             (unsigned long long)g_audioPackets.load(),
+             (unsigned long long)g_audioBytes.load(),
+             (unsigned long long)g_audioErrors.load());
 
         lastPackets = packets;
         lastAU = aus;
         lastDecoded = decoded;
         lastPresented = presented;
     }
+}
+
+static void AudioThread() {
+    SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listenSock == INVALID_SOCKET) {
+        Logf(L"audio socket creation failed");
+        return;
+    }
+
+    BOOL reuse = TRUE;
+    setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(4824);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(listenSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR ||
+        listen(listenSock, 1) == SOCKET_ERROR) {
+        Logf(L"audio listen failed wsa=%d", WSAGetLastError());
+        closesocket(listenSock);
+        return;
+    }
+
+    while (g_running) {
+        fd_set set{};
+        FD_ZERO(&set);
+        FD_SET(listenSock, &set);
+        timeval tv{1, 0};
+        int ready = select(0, &set, nullptr, nullptr, &tv);
+        if (!g_running) break;
+        if (ready <= 0) continue;
+
+        SOCKET s = accept(listenSock, nullptr, nullptr);
+        if (s == INVALID_SOCKET) continue;
+
+        BOOL noDelay = TRUE;
+        setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+
+        PcmAudioPlayer player;
+        HRESULT initHr = player.Initialize();
+        if (FAILED(initHr)) {
+            ++g_audioErrors;
+            Logf(L"audio playback init failed hr=0x%08X", (unsigned)initHr);
+            closesocket(s);
+            continue;
+        }
+
+        Logf(L"audio client connected");
+        while (g_running) {
+            uint8_t hdr[5];
+            if (!ReadExact(s, hdr, 5)) break;
+            uint32_t len = ((uint32_t)hdr[0] << 24) |
+                           ((uint32_t)hdr[1] << 16) |
+                           ((uint32_t)hdr[2] << 8) |
+                           (uint32_t)hdr[3];
+            uint8_t type = hdr[4];
+            if (len > 4 * 1024 * 1024) break;
+
+            std::vector<uint8_t> payload(len);
+            if (len && !ReadExact(s, payload.data(), (int)len)) break;
+
+            if (type == DISCONNECT) break;
+            if (type == CONFIG) continue;
+
+            const uint8_t* pcm = nullptr;
+            size_t pcmBytes = 0;
+            if (type == AUDIO_PCM_V2 && payload.size() >= 12) {
+                pcm = payload.data() + 12;
+                pcmBytes = payload.size() - 12;
+            } else if (type == AUDIO_PCM) {
+                pcm = payload.data();
+                pcmBytes = payload.size();
+            } else {
+                continue;
+            }
+
+            if (pcmBytes) {
+                HRESULT hr = player.Submit(pcm, pcmBytes);
+                if (FAILED(hr)) {
+                    ++g_audioErrors;
+                    Logf(L"audio submit failed hr=0x%08X bytes=%llu",
+                         (unsigned)hr, (unsigned long long)pcmBytes);
+                    break;
+                }
+                ++g_audioPackets;
+                g_audioBytes += pcmBytes;
+            }
+        }
+
+        player.Shutdown();
+        shutdown(s, SD_BOTH);
+        closesocket(s);
+        Logf(L"audio client disconnected");
+    }
+
+    closesocket(listenSock);
 }
 
 static void NetworkThread() {
@@ -1218,6 +1395,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     SetForegroundWindow(g_hwnd);
 
     std::thread network(NetworkThread);
+    std::thread audio(AudioThread);
     std::thread decoder(DecoderThread);
     std::thread presenter(PresentThread);
     std::thread diagnostics(DiagnosticsThread);
@@ -1235,6 +1413,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     g_presentCvNotEmpty.notify_all();
     g_presentCvNotFull.notify_all();
     if (network.joinable()) network.join();
+    if (audio.joinable()) audio.join();
     if (decoder.joinable()) decoder.join();
     if (presenter.joinable()) presenter.join();
     if (diagnostics.joinable()) diagnostics.join();
