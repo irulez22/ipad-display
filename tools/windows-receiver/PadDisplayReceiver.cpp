@@ -54,6 +54,8 @@ static SOCKET g_client = INVALID_SOCKET;
 static std::mutex g_sendMutex;
 static int g_streamWidth = 1366;
 static int g_streamHeight = 768;
+static bool g_fullscreen = true;
+static WINDOWPLACEMENT g_windowPlacement{ sizeof(WINDOWPLACEMENT) };
 static std::atomic<uint64_t> g_videoPackets{0};
 static std::atomic<uint64_t> g_videoBytes{0};
 static std::atomic<uint64_t> g_accessUnits{0};
@@ -712,6 +714,45 @@ static void NetworkThread() {
     closesocket(listenSock);
 }
 
+static void ToggleFullscreen() {
+    if (!g_hwnd) return;
+
+    if (g_fullscreen) {
+        GetWindowPlacement(g_hwnd, &g_windowPlacement);
+
+        LONG_PTR style = GetWindowLongPtrW(g_hwnd, GWL_STYLE);
+        style &= ~WS_POPUP;
+        style |= WS_OVERLAPPEDWINDOW;
+        SetWindowLongPtrW(g_hwnd, GWL_STYLE, style);
+
+        SetWindowPos(
+            g_hwnd,
+            HWND_NOTOPMOST,
+            100, 100, 1100, 700,
+            SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        ShowWindow(g_hwnd, SW_RESTORE);
+        g_fullscreen = false;
+    } else {
+        MONITORINFO mi{ sizeof(mi) };
+        GetMonitorInfoW(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+
+        LONG_PTR style = GetWindowLongPtrW(g_hwnd, GWL_STYLE);
+        style &= ~WS_OVERLAPPEDWINDOW;
+        style |= WS_POPUP;
+        SetWindowLongPtrW(g_hwnd, GWL_STYLE, style);
+
+        SetWindowPos(
+            g_hwnd,
+            HWND_TOPMOST,
+            mi.rcMonitor.left,
+            mi.rcMonitor.top,
+            mi.rcMonitor.right - mi.rcMonitor.left,
+            mi.rcMonitor.bottom - mi.rcMonitor.top,
+            SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        g_fullscreen = true;
+    }
+}
+
 static void SendMouseTouch(uint8_t phase, int x, int y) {
     RECT rc{}; GetClientRect(g_hwnd, &rc);
     int w = std::max(1L, rc.right - rc.left);
@@ -808,7 +849,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
     case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) return 0;
+        if (wParam == VK_F11) {
+            ToggleFullscreen();
+            return 0;
+        }
+        if (wParam == VK_ESCAPE) {
+            if (g_fullscreen) ToggleFullscreen();
+            return 0;
+        }
         break;
     case WM_CLOSE:
         g_running = false;
