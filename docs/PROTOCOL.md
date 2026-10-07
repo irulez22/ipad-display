@@ -37,3 +37,14 @@ The Windows launcher prefers USB when usbmux is available. For Wi-Fi it first re
 ## Runtime telemetry
 
 The Windows streamer writes a small JSON status file under `%LOCALAPPDATA%\PadDisplay\status.json`. It contains transport, host, uptime, current video/audio throughput, packet ages, touch count, and the most recent CONFIG handshake received from the iPad. The non-elevated launcher reads this file to display live health without requiring direct IPC with the elevated engine.
+
+
+## Battery telemetry
+
+While the main video/touch connection is active, the iPad sends an updated CONFIG JSON approximately every five seconds. The payload reuses the normal capability/version fields and also includes `battery_percent` and `battery_state` (`charging`, `full`, `unplugged`, or `unknown`). The Windows streamer merges the most recent values into its status JSON and the launcher displays them in the live health line.
+
+Battery voltage is intentionally not required by the protocol because public iOS APIs do not expose it reliably. The diagnostics collector performs a best-effort search for additional power fields such as voltage/capacity when jailbreak tools expose them.
+
+## Diagnostics
+
+`tools/collect_diagnostics.sh` creates a timestamped bundle under `diagnostics/`. It captures repository/build metadata, Windows version/GPU, virtual-display devices, the PadDisplay scheduled task, relevant processes, live status JSON, iPad package/app versions, updater state/log, app log, system uptime, USB visibility, and best-effort battery/power information. The Windows launcher exposes this through its Diagnostics button and opens the diagnostics folder after collection.
