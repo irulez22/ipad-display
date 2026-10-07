@@ -1,0 +1,51 @@
+name: Build Windows Receiver
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/windows-receiver/PadDisplayReceiver.cpp"
+      - "tools/windows-receiver/build_receiver.ps1"
+      - ".github/workflows/build-windows-receiver.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build native receiver
+        shell: pwsh
+        run: |
+          $outDir = Join-Path $PWD "tools\windows-receiver\bin"
+          & "$PWD\tools\windows-receiver\build_receiver.ps1" -OutputDir $outDir
+          $exe = Join-Path $outDir "PadDisplayReceiver.exe"
+          if (-not (Test-Path $exe)) { throw "Receiver EXE was not produced." }
+          ((Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant() + "  PadDisplayReceiver.exe") |
+            Set-Content -NoNewline (Join-Path $outDir "PadDisplayReceiver.exe.sha256")
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PadDisplayReceiver
+          path: |
+            tools/windows-receiver/bin/PadDisplayReceiver.exe
+            tools/windows-receiver/bin/PadDisplayReceiver.exe.sha256
+
+      - name: Commit prebuilt receiver
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f tools/windows-receiver/bin/PadDisplayReceiver.exe tools/windows-receiver/bin/PadDisplayReceiver.exe.sha256
+          if (git diff --cached --quiet) {
+            Write-Host "Prebuilt receiver is unchanged."
+            exit 0
+          }
+          git commit -m "Update prebuilt Windows receiver [skip ci]"
+          git push
