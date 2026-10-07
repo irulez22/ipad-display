@@ -57,3 +57,17 @@ Battery voltage is intentionally not required by the protocol because public iOS
 The Windows laptop receiver behaves like a normal desktop input device rather than emulating iPad touch. Mouse movement, left/right/middle buttons and wheel events are sent as MOUSE_V1. Keyboard key-down/key-up events are sent as KEYBOARD_V1 and injected on the host with Win32 SendInput. The mouse coordinates remain normalized to the receiver surface and are mapped to the selected virtual monitor.
 
 F11 is reserved locally by the laptop receiver for fullscreen/windowed toggle. Escape leaves fullscreen locally; once windowed, Escape is forwarded normally. Touch pointer packets remain supported only for an actual touchscreen-capable laptop.
+
+
+## Thin-client session mode
+
+Windows laptop receivers advertise `session_mode: "thin_client"` in CONFIG. The host generates a `session_id` for each connection attempt and advertises the same session intent. This keeps the existing H.264 transport compatible while allowing laptop-specific capabilities to evolve independently from the iPad display path.
+
+Current channel responsibilities are:
+
+- TCP 4822: H.264 video, CONFIG/session control, mouse, keyboard and optional touchscreen input.
+- TCP 4824: dedicated 48 kHz stereo PCM audio using AUDIO_PCM_V2.
+
+The laptop path uses native mouse and keyboard input as first-class controls. Touch injection is optional and lazily initialized only when TOUCH_V1/TOUCH_V2 packets are actually received, so failure or absence of touch support cannot disable mouse, keyboard, wheel or trackpad scrolling.
+
+The receiver keeps video decode and presentation on bounded worker queues. The access-unit queue is capped at two AUs and the presentation queue at one decoded frame. Producers block briefly when a queue is full rather than intentionally discarding frames, limiting runaway latency while preserving lossless backpressure.
