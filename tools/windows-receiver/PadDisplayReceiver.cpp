@@ -533,9 +533,23 @@ private:
             }
             if (FAILED(hr)) return hr;
 
+            const bool transformProvidedSample =
+                (info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) != 0;
+
             if (out.pSample) {
                 ++g_decodedFrames;
                 HRESULT presentHr = presenter_->PresentSample(out.pSample);
+
+                // When the decoder owns/provides the output sample, ProcessOutput
+                // transfers a reference to us. Release it immediately after
+                // presentation so the decoder/DXVA surface can return to its
+                // finite surface pool. Leaking these references exhausts the
+                // pool after only a handful of frames and stalls the stream.
+                if (transformProvidedSample) {
+                    out.pSample->Release();
+                    out.pSample = nullptr;
+                }
+
                 if (FAILED(presentHr)) {
                     if (out.pEvents) out.pEvents->Release();
                     return presentHr;
