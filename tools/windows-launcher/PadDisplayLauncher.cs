@@ -64,7 +64,6 @@ class PadDisplayLauncher : Form
         fps.Items.AddRange(new object[] {"60","30"});
         bitrate.Dock = DockStyle.Fill;
         receiverHost.Dock = DockStyle.Fill;
-        receiverHost.PlaceholderText = "blank = iPad, or laptop IP/hostname";
 
         AddRow(top,0,"Display",display,"Resolution",resolution);
         AddRow(top,1,"FPS",fps,"Bitrate",bitrate);
