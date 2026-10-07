@@ -17,6 +17,7 @@ class PadDisplayLauncher : Form
     Button start = new Button();
     Button stop = new Button();
     Button save = new Button();
+    Button diagnostics = new Button();
     TextBox log = new TextBox();
     Label status = new Label();
     NotifyIcon tray;
@@ -70,9 +71,9 @@ class PadDisplayLauncher : Form
         top.Controls.Add(minimized,0,3); top.SetColumnSpan(minimized,2);
 
         var buttons = new FlowLayoutPanel(); buttons.Dock = DockStyle.Fill;
-        start.Text="Start"; stop.Text="Stop"; save.Text="Save settings";
-        start.Width=90; stop.Width=90; save.Width=110; stop.Enabled=false;
-        buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(save);
+        start.Text="Start"; stop.Text="Stop"; save.Text="Save settings"; diagnostics.Text="Diagnostics";
+        start.Width=90; stop.Width=90; save.Width=110; diagnostics.Width=100; stop.Enabled=false;
+        buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(save); buttons.Controls.Add(diagnostics);
         top.Controls.Add(buttons,2,3); top.SetColumnSpan(buttons,2);
 
         status.Text="Stopped"; status.Dock=DockStyle.Top; status.Height=50; status.Padding=new Padding(12,5,0,0);
@@ -93,6 +94,7 @@ class PadDisplayLauncher : Form
         start.Click += delegate { StartEngine(); };
         stop.Click += delegate { StopEngine(); };
         save.Click += delegate { SaveSettings(); ApplyStartup(); Append("Settings saved."); };
+        diagnostics.Click += delegate { CollectDiagnostics(); };
 
         tray = new NotifyIcon(); tray.Visible=true; tray.Text="PadDisplay"; tray.Icon=SystemIcons.Application;
         var menu = new ContextMenuStrip();
@@ -302,6 +304,8 @@ class PadDisplayLauncher : Form
             string build = JsonValue(json, "ipad_build");
             string protocol = JsonValue(json, "protocol");
             string name = JsonValue(json, "ipad_name");
+            string battery = JsonValue(json, "battery_percent");
+            string batteryState = JsonValue(json, "battery_state");
 
             string device = String.IsNullOrEmpty(name) ? "iPad" : name;
             string version = String.IsNullOrEmpty(app) ? "waiting for handshake" :
@@ -310,14 +314,19 @@ class PadDisplayLauncher : Form
                 ? " • PROTOCOL MISMATCH"
                 : "";
 
+            string batteryText = String.IsNullOrEmpty(battery) || battery == "-1"
+                ? "Battery ?"
+                : ("Battery " + battery + "%" + (String.IsNullOrEmpty(batteryState) ? "" : " • " + batteryState));
+
             status.Text = String.Format(
-                "{0} • {1} {2} • {3}\r\nVideo {4} Mbps • Audio {5} kbps{6}",
+                "{0} • {1} {2} • {3}\r\nVideo {4} Mbps • Audio {5} kbps • {6}{7}",
                 device,
                 String.IsNullOrEmpty(transport) ? "?" : transport,
                 String.IsNullOrEmpty(host) ? "" : host,
                 version,
                 String.IsNullOrEmpty(video) ? "0" : video,
                 String.IsNullOrEmpty(audio) ? "0" : audio,
+                batteryText,
                 health);
             start.Enabled=false;
             stop.Enabled=true;
@@ -325,6 +334,48 @@ class PadDisplayLauncher : Form
         catch
         {
             // Status is best-effort; never break the launcher over telemetry.
+        }
+    }
+
+    void CollectDiagnostics()
+    {
+        diagnostics.Enabled=false;
+        Append("Collecting diagnostics...");
+        try
+        {
+            var psi=new ProcessStartInfo(
+                "wsl.exe",
+                "-d Ubuntu -- bash -lc \"cd ~/ipad-display && bash tools/collect_diagnostics.sh\"");
+            psi.UseShellExecute=false;
+            psi.CreateNoWindow=true;
+            psi.RedirectStandardOutput=true;
+            psi.RedirectStandardError=true;
+            var p=Process.Start(psi);
+            string stdout=p.StandardOutput.ReadToEnd();
+            string stderr=p.StandardError.ReadToEnd();
+            p.WaitForExit();
+            if(!String.IsNullOrWhiteSpace(stdout)) Append(stdout.Trim());
+            if(!String.IsNullOrWhiteSpace(stderr)) Append(stderr.Trim());
+            if(p.ExitCode==0)
+            {
+                Append("Diagnostics complete.");
+                Process.Start(new ProcessStartInfo(
+                    "explorer.exe",
+                    @"\\wsl$\Ubuntu\home\josh\ipad-display\diagnostics")
+                    { UseShellExecute=true });
+            }
+            else
+            {
+                Append("Diagnostics failed with exit code " + p.ExitCode + ".");
+            }
+        }
+        catch(Exception ex)
+        {
+            Append("Diagnostics failed: " + ex.Message);
+        }
+        finally
+        {
+            diagnostics.Enabled=true;
         }
     }
 
