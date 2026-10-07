@@ -31,7 +31,7 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $out = Join-Path $OutputDir "PadDisplayReceiver.exe"
 Get-Process PadDisplayReceiver -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-$cmd = 'call "' + $vsDev + '" -arch=x64 -host_arch=x64 >nul && cl /nologo /std:c++17 /EHsc /O2 /DUNICODE /D_UNICODE "' + $src + '" /Fe:"' + $out + '" user32.lib gdi32.lib ws2_32.lib mfplat.lib mfuuid.lib mf.lib d3d11.lib dxgi.lib wmcodecdspuuid.lib'
+$cmd = 'call "' + $vsDev + '" -arch=x64 -host_arch=x64 >nul && cl /nologo /std:c++17 /EHsc /O2 /DUNICODE /D_UNICODE "' + $src + '" /Fe:"' + $out + '" user32.lib gdi32.lib ole32.lib ws2_32.lib mfplat.lib mfuuid.lib mf.lib d3d11.lib dxgi.lib wmcodecdspuuid.lib'
 & cmd.exe /c $cmd
 
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $out)) {
