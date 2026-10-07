@@ -158,9 +158,16 @@ public:
         desc.BufferCount = 2;
         desc.Scaling = DXGI_SCALING_STRETCH;
         desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
         hr = factory->CreateSwapChainForHwnd(device_.Get(), hwnd_, &desc, nullptr, nullptr, &swapChain_);
         if (FAILED(hr)) return hr;
+
+        ComPtr<IDXGISwapChain2> swapChain2;
+        if (SUCCEEDED(swapChain_.As(&swapChain2))) {
+            swapChain2->SetMaximumFrameLatency(1);
+            frameLatencyWaitable_ = swapChain2->GetFrameLatencyWaitableObject();
+        }
 
         hr = device_.As(&videoDevice_);
         if (FAILED(hr)) return hr;
@@ -176,7 +183,9 @@ public:
         if (!swapChain_) return E_FAIL;
         if (width <= 0 || height <= 0) return S_OK;
         context_->ClearState();
-        return swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+        return swapChain_->ResizeBuffers(
+            0, width, height, DXGI_FORMAT_UNKNOWN,
+            DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
     }
 
     HRESULT CreateVideoProcessor(int width, int height) {
@@ -355,7 +364,20 @@ public:
             return hr;
         }
 
-        hr = swapChain_->Present(1, 0);
+        // Keep at most one frame queued without blocking indefinitely inside
+        // a vsync Present call. The waitable swap chain gives us explicit
+        // presentation backpressure while Present(0,0) avoids tying up the
+        // network/decode loop on a synchronous refresh wait.
+        if (frameLatencyWaitable_) {
+            DWORD wait = WaitForSingleObject(frameLatencyWaitable_, 100);
+            if (wait != WAIT_OBJECT_0 && wait != WAIT_TIMEOUT) {
+                hr = HRESULT_FROM_WIN32(GetLastError());
+                g_lastHr = (unsigned long)hr;
+                return hr;
+            }
+        }
+
+        hr = swapChain_->Present(0, 0);
         if (SUCCEEDED(hr)) {
             ++g_presentedFrames;
         } else {
@@ -369,6 +391,7 @@ private:
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
     ComPtr<IDXGISwapChain1> swapChain_;
+    HANDLE frameLatencyWaitable_ = nullptr;
     ComPtr<ID3D11VideoDevice> videoDevice_;
     ComPtr<ID3D11VideoContext> videoContext_;
     ComPtr<ID3D11VideoProcessorEnumerator> enumerator_;
