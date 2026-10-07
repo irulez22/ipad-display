@@ -11,7 +11,9 @@ Each frame contains a 4-byte unsigned big-endian payload length, a 1-byte packet
 | 0x03 | CONFIG | Either | UTF-8 JSON capability/version hello |
 | 0x04 | DISCONNECT | Either | Empty |
 | 0x10 | TOUCH_V1 | iPad -> Windows | Legacy 5-byte packet: phase (u8), normalized X (u16 BE), normalized Y (u16 BE) |
-| 0x11 | TOUCH_V2 | iPad -> Windows | count (u8), then count × 7-byte contacts: id (u16 BE), phase (u8), X (u16 BE), Y (u16 BE) |
+| 0x11 | TOUCH_V2 | iPad/touchscreen receiver -> Windows | count (u8), then count × 7-byte contacts: id (u16 BE), phase (u8), X (u16 BE), Y (u16 BE) |
+| 0x12 | MOUSE_V1 | Windows laptop receiver -> Windows host | action (u8), button (u8), X (u16 BE), Y (u16 BE), wheel delta (i16 BE). Actions: 0 move, 1 button down, 2 button up, 3 vertical wheel. Buttons: 0 none, 1 left, 2 right, 3 middle, 4 X1, 5 X2. |
+| 0x13 | KEYBOARD_V1 | Windows laptop receiver -> Windows host | action (u8: 0 down, 1 up), virtual-key (u16 BE), scan code (u16 BE), flags (u8; bit 0 extended-key). |
 | 0x20 | AUDIO_PCM | Windows -> iPad (TCP 4824) | Legacy 48 kHz stereo signed 16-bit LE PCM. |
 | 0x21 | AUDIO_PCM_V2 | Windows -> iPad (TCP 4824) | sequence (u32 BE), monotonic timestamp µs (u64 BE), then 48 kHz stereo signed 16-bit LE PCM. |
 
@@ -48,3 +50,10 @@ Battery voltage is intentionally not required by the protocol because public iOS
 ## Diagnostics
 
 `tools/collect_diagnostics.sh` creates a timestamped bundle under `diagnostics/`. It captures repository/build metadata, Windows version/GPU, virtual-display devices, the PadDisplay scheduled task, relevant processes, live status JSON, iPad package/app versions, updater state/log, app log, system uptime, USB visibility, and best-effort battery/power information. The Windows launcher exposes this through its Diagnostics button and opens the diagnostics folder after collection.
+
+
+## Laptop receiver input
+
+The Windows laptop receiver behaves like a normal desktop input device rather than emulating iPad touch. Mouse movement, left/right/middle buttons and wheel events are sent as MOUSE_V1. Keyboard key-down/key-up events are sent as KEYBOARD_V1 and injected on the host with Win32 SendInput. The mouse coordinates remain normalized to the receiver surface and are mapped to the selected virtual monitor.
+
+F11 is reserved locally by the laptop receiver for fullscreen/windowed toggle. Escape leaves fullscreen locally; once windowed, Escape is forwarded normally. Touch pointer packets remain supported only for an actual touchscreen-capable laptop.
