@@ -129,12 +129,14 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
         return;
     }
 
-    [self.telemetryTimer invalidate];
-    self.telemetryTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
-                                                           target:self
-                                                         selector:@selector(sendDeviceStatus)
-                                                         userInfo:nil
-                                                          repeats:YES];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.telemetryTimer invalidate];
+        self.telemetryTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                               target:self
+                                                             selector:@selector(sendDeviceStatus)
+                                                             userInfo:nil
+                                                              repeats:YES];
+    });
 
     PDLog(@"Video/touch receiver connected; sent protocol hello");
     self.videoReady = NO;
@@ -154,8 +156,10 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
     }
 
     PDLog(@"Video/touch receiver disconnected error=%@", error);
-    [self.telemetryTimer invalidate];
-    self.telemetryTimer = nil;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.telemetryTimer invalidate];
+        self.telemetryTimer = nil;
+    });
     self.videoReady = NO;
     [self.touchIDs removeAllObjects];
     [self.parser flush];
