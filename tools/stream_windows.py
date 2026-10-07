@@ -21,6 +21,8 @@ CONFIG = 0x03
 PROTOCOL_VERSION = 1
 TOUCH_V1 = 0x10
 TOUCH_V2 = 0x11
+MOUSE_V1 = 0x12
+KEYBOARD_V1 = 0x13
 PORT = 4822
 AUDIO_PORT = 4824
 MAX_TOUCH_CONTACTS = 10
@@ -461,6 +463,128 @@ def parse_touch_v2(payload):
     return contacts
 
 
+def _monitor_point(monitor_rect, x_raw, y_raw):
+    left, top, right, bottom = monitor_rect
+    x = int(round(left + (x_raw / 65535.0) * max(1, right - left - 1)))
+    y = int(round(top + (y_raw / 65535.0) * max(1, bottom - top - 1)))
+    return x, y
+
+
+def inject_mouse_packet(payload, monitor_rect):
+    if sys.platform != "win32" or monitor_rect is None or len(payload) != 8:
+        return False
+
+    action, button, x_raw, y_raw, wheel = struct.unpack(">BBHHh", payload)
+    x, y = _monitor_point(monitor_rect, x_raw, y_raw)
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    INPUT_MOUSE = 0
+    MOUSEEVENTF_MOVE = 0x0001
+    MOUSEEVENTF_LEFTDOWN = 0x0002
+    MOUSEEVENTF_LEFTUP = 0x0004
+    MOUSEEVENTF_RIGHTDOWN = 0x0008
+    MOUSEEVENTF_RIGHTUP = 0x0010
+    MOUSEEVENTF_MIDDLEDOWN = 0x0020
+    MOUSEEVENTF_MIDDLEUP = 0x0040
+    MOUSEEVENTF_WHEEL = 0x0800
+    MOUSEEVENTF_XDOWN = 0x0080
+    MOUSEEVENTF_XUP = 0x0100
+    MOUSEEVENTF_ABSOLUTE = 0x8000
+    MOUSEEVENTF_VIRTUALDESK = 0x4000
+    XBUTTON1 = 0x0001
+    XBUTTON2 = 0x0002
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class INPUTUNION(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _anonymous_ = ("u",)
+        _fields_ = [("type", wintypes.DWORD), ("u", INPUTUNION)]
+
+    vx = user32.GetSystemMetrics(76)
+    vy = user32.GetSystemMetrics(77)
+    vw = max(1, user32.GetSystemMetrics(78))
+    vh = max(1, user32.GetSystemMetrics(79))
+    dx = int(round((x - vx) * 65535.0 / max(1, vw - 1)))
+    dy = int(round((y - vy) * 65535.0 / max(1, vh - 1)))
+
+    flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+    data = 0
+    if action == 1:
+        flags |= {1:MOUSEEVENTF_LEFTDOWN, 2:MOUSEEVENTF_RIGHTDOWN, 3:MOUSEEVENTF_MIDDLEDOWN,
+                  4:MOUSEEVENTF_XDOWN, 5:MOUSEEVENTF_XDOWN}.get(button, 0)
+        if button == 4: data = XBUTTON1
+        elif button == 5: data = XBUTTON2
+    elif action == 2:
+        flags |= {1:MOUSEEVENTF_LEFTUP, 2:MOUSEEVENTF_RIGHTUP, 3:MOUSEEVENTF_MIDDLEUP,
+                  4:MOUSEEVENTF_XUP, 5:MOUSEEVENTF_XUP}.get(button, 0)
+        if button == 4: data = XBUTTON1
+        elif button == 5: data = XBUTTON2
+    elif action == 3:
+        flags |= MOUSEEVENTF_WHEEL
+        data = ctypes.c_uint32(ctypes.c_int32(wheel).value).value
+
+    inp = INPUT()
+    inp.type = INPUT_MOUSE
+    inp.mi = MOUSEINPUT(dx, dy, data, flags, 0, None)
+    sent = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    if sent != 1:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return True
+
+
+def inject_keyboard_packet(payload):
+    if sys.platform != "win32" or len(payload) != 6:
+        return False
+
+    action, vk, scan, flags = struct.unpack(">BHHB", payload)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    INPUT_KEYBOARD = 1
+    KEYEVENTF_EXTENDEDKEY = 0x0001
+    KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_SCANCODE = 0x0008
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class INPUTUNION(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _anonymous_ = ("u",)
+        _fields_ = [("type", wintypes.DWORD), ("u", INPUTUNION)]
+
+    dw_flags = KEYEVENTF_SCANCODE
+    if flags & 0x01:
+        dw_flags |= KEYEVENTF_EXTENDEDKEY
+    if action == 1:
+        dw_flags |= KEYEVENTF_KEYUP
+
+    inp = INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp.ki = KEYBDINPUT(vk, scan, dw_flags, 0, None)
+    sent = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    if sent != 1:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return True
+
+
 def input_loop(sock, monitor_rect, stats=None):
     if monitor_rect is None:
         print("Touch: matching stream monitor not found; touch input disabled.")
@@ -501,6 +625,11 @@ def input_loop(sock, monitor_rect, stats=None):
                         pass
                 except Exception:
                     pass
+            elif packet_type == MOUSE_V1:
+                if inject_mouse_packet(payload, monitor_rect) and stats is not None:
+                    stats.add_touch()
+            elif packet_type == KEYBOARD_V1:
+                inject_keyboard_packet(payload)
             elif packet_type == TOUCH_V2:
                 contacts = parse_touch_v2(payload)
                 if contacts:
