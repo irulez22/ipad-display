@@ -4,7 +4,6 @@ using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
 using Microsoft.Win32;
-using System.Text.RegularExpressions;
 
 class PadDisplayLauncher : Form
 {
@@ -263,13 +262,24 @@ class PadDisplayLauncher : Form
 
     string JsonValue(string json, string key)
     {
-        var match = Regex.Match(
-            json,
-            "\\"" + Regex.Escape(key) + "\\"\\s*:\\s*(?:\\\"(?<s>[^\\\"]*)\\\"|(?<n>-?[0-9]+(?:\\.[0-9]+)?)|null)");
-        if(!match.Success) return "";
-        if(match.Groups["s"].Success) return match.Groups["s"].Value;
-        if(match.Groups["n"].Success) return match.Groups["n"].Value;
-        return "";
+        string token = "\"" + key + "\":";
+        int start = json.IndexOf(token, StringComparison.Ordinal);
+        if(start < 0) return "";
+        start += token.Length;
+        while(start < json.Length && Char.IsWhiteSpace(json[start])) start++;
+        if(start >= json.Length) return "";
+
+        if(json[start] == '"')
+        {
+            start++;
+            int end = json.IndexOf('"', start);
+            return end < 0 ? "" : json.Substring(start, end - start);
+        }
+
+        int pos = start;
+        while(pos < json.Length && json[pos] != ',' && json[pos] != '}') pos++;
+        string value = json.Substring(start, pos - start).Trim();
+        return value == "null" ? "" : value;
     }
 
     void UpdateTelemetry()
