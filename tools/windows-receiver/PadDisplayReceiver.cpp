@@ -275,17 +275,31 @@ public:
             MFT_CATEGORY_VIDEO_DECODER,
             MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
             &inputInfo, &outputInfo, &activates, &count);
-        if (FAILED(hr) || count == 0) {
-            if (activates) CoTaskMemFree(activates);
-            return FAILED(hr) ? hr : MF_E_TOPO_CODEC_NOT_FOUND;
+
+        if (SUCCEEDED(hr) && count > 0) {
+            hr = activates[0]->ActivateObject(IID_PPV_ARGS(&decoder_));
+        } else {
+            hr = CoCreateInstance(
+                CLSID_CMSH264DecoderMFT,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(&decoder_));
         }
 
-        hr = activates[0]->ActivateObject(IID_PPV_ARGS(&decoder_));
-        for (UINT32 i = 0; i < count; ++i) activates[i]->Release();
-        CoTaskMemFree(activates);
+        if (activates) {
+            for (UINT32 i = 0; i < count; ++i) activates[i]->Release();
+            CoTaskMemFree(activates);
+        }
         if (FAILED(hr)) return hr;
 
-        decoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)deviceManager_.Get());
+        // The Microsoft H.264 decoder may not be registered as a hardware MFT
+        // even when it can use DXVA/D3D11 acceleration internally. Supplying
+        // the DXGI device manager is the Media Foundation path that enables
+        // D3D11-backed decode surfaces when the graphics driver supports them.
+        hr = decoder_->ProcessMessage(
+            MFT_MESSAGE_SET_D3D_MANAGER,
+            (ULONG_PTR)deviceManager_.Get());
+        if (FAILED(hr)) return hr;
 
         ComPtr<IMFMediaType> inType;
         MFCreateMediaType(&inType);
