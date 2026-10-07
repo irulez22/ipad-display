@@ -17,6 +17,9 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <atomic>
 #include <cctype>
 #include <cstdint>
@@ -25,6 +28,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <cstdarg>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -63,6 +67,120 @@ static std::atomic<uint64_t> g_accessUnits{0};
 static std::atomic<uint64_t> g_decodedFrames{0};
 static std::atomic<uint64_t> g_presentedFrames{0};
 static std::atomic<unsigned long> g_lastHr{0};
+static std::atomic<uint64_t> g_decoderErrors{0};
+static std::atomic<uint64_t> g_reconnects{0};
+static std::atomic<uint64_t> g_auQueueHighWater{0};
+static std::atomic<uint64_t> g_presentQueueHighWater{0};
+static std::atomic<uint64_t> g_decodeStalls{0};
+static std::atomic<uint64_t> g_presentStalls{0};
+
+static constexpr size_t AU_QUEUE_MAX = 4;
+static constexpr size_t PRESENT_QUEUE_MAX = 1;
+
+static std::mutex g_auMutex;
+static std::condition_variable g_auCvNotEmpty;
+static std::condition_variable g_auCvNotFull;
+static std::deque<std::vector<uint8_t>> g_auQueue;
+
+static std::mutex g_presentMutex;
+static std::condition_variable g_presentCvNotEmpty;
+static std::condition_variable g_presentCvNotFull;
+static std::deque<ComPtr<IMFSample>> g_presentQueue;
+
+static std::atomic<bool> g_decoderResetRequested{false};
+static std::mutex g_logMutex;
+static FILE* g_logFile = nullptr;
+static std::wstring g_logPath;
+
+static void InitLog() {
+    wchar_t localAppData[MAX_PATH]{};
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, ARRAYSIZE(localAppData));
+    if (n == 0 || n >= ARRAYSIZE(localAppData)) return;
+
+    std::wstring dir = std::wstring(localAppData) + L"\\PadDisplayReceiver";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    g_logPath = dir + L"\\receiver.log";
+
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (GetFileAttributesExW(g_logPath.c_str(), GetFileExInfoStandard, &fad)) {
+        ULARGE_INTEGER size{};
+        size.HighPart = fad.nFileSizeHigh;
+        size.LowPart = fad.nFileSizeLow;
+        if (size.QuadPart > 2ull * 1024ull * 1024ull) {
+            std::wstring oldPath = dir + L"\\receiver.old.log";
+            DeleteFileW(oldPath.c_str());
+            MoveFileW(g_logPath.c_str(), oldPath.c_str());
+        }
+    }
+    _wfopen_s(&g_logFile, g_logPath.c_str(), L"a+, ccs=UTF-8");
+}
+
+static void Logf(const wchar_t* fmt, ...) {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    if (!g_logFile) return;
+
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    fwprintf(g_logFile, L"%04u-%02u-%02u %02u:%02u:%02u.%03u ",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+    va_list args;
+    va_start(args, fmt);
+    vfwprintf(g_logFile, fmt, args);
+    va_end(args);
+    fputws(L"\n", g_logFile);
+    fflush(g_logFile);
+}
+
+static void CloseLog() {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    if (g_logFile) {
+        fclose(g_logFile);
+        g_logFile = nullptr;
+    }
+}
+
+static void UpdateHighWater(std::atomic<uint64_t>& target, uint64_t value) {
+    uint64_t current = target.load();
+    while (value > current && !target.compare_exchange_weak(current, value)) {}
+}
+
+static bool QueueAccessUnit(std::vector<uint8_t>&& au) {
+    std::unique_lock<std::mutex> lock(g_auMutex);
+    auto waitStart = std::chrono::steady_clock::now();
+    g_auCvNotFull.wait(lock, [] {
+        return !g_running || !g_connected || g_auQueue.size() < AU_QUEUE_MAX;
+    });
+    auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - waitStart).count();
+    if (waited >= 10) ++g_decodeStalls;
+    if (!g_running || !g_connected) return false;
+    g_auQueue.emplace_back(std::move(au));
+    UpdateHighWater(g_auQueueHighWater, g_auQueue.size());
+    lock.unlock();
+    g_auCvNotEmpty.notify_one();
+    return true;
+}
+
+static bool QueuePresentSample(IMFSample* sample) {
+    if (!sample) return false;
+    ComPtr<IMFSample> hold = sample;
+
+    std::unique_lock<std::mutex> lock(g_presentMutex);
+    auto waitStart = std::chrono::steady_clock::now();
+    g_presentCvNotFull.wait(lock, [] {
+        return !g_running || !g_connected || g_presentQueue.size() < PRESENT_QUEUE_MAX;
+    });
+    auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - waitStart).count();
+    if (waited >= 10) ++g_presentStalls;
+    if (!g_running || !g_connected) return false;
+    g_presentQueue.emplace_back(std::move(hold));
+    UpdateHighWater(g_presentQueueHighWater, g_presentQueue.size());
+    lock.unlock();
+    g_presentCvNotEmpty.notify_one();
+    return true;
+}
 
 static std::wstring Utf8ToWide(const std::string& s) {
     if (s.empty()) return L"";
@@ -539,21 +657,19 @@ private:
 
             if (out.pSample) {
                 ++g_decodedFrames;
-                HRESULT presentHr = presenter_->PresentSample(out.pSample);
+                bool queued = QueuePresentSample(out.pSample);
 
                 // When the decoder owns/provides the output sample, ProcessOutput
-                // transfers a reference to us. Release it immediately after
-                // presentation so the decoder/DXVA surface can return to its
-                // finite surface pool. Leaking these references exhausts the
-                // pool after only a handful of frames and stalls the stream.
+                // transfers a reference to us. QueuePresentSample took its own
+                // reference, so release the transform-owned reference now.
                 if (transformProvidedSample) {
                     out.pSample->Release();
                     out.pSample = nullptr;
                 }
 
-                if (FAILED(presentHr)) {
+                if (!queued) {
                     if (out.pEvents) out.pEvents->Release();
-                    return presentHr;
+                    return MF_E_SHUTDOWN;
                 }
             }
             if (out.pEvents) out.pEvents->Release();
@@ -570,7 +686,6 @@ private:
 };
 
 static D3DPresenter g_presenter;
-static std::unique_ptr<H264Decoder> g_decoder;
 
 static bool IsStartCode(const std::vector<uint8_t>& b, size_t i, size_t& scLen) {
     if (i + 3 <= b.size() && b[i] == 0 && b[i+1] == 0 && b[i+2] == 1) {
@@ -601,13 +716,9 @@ static void FeedAnnexB(std::vector<uint8_t>& pending, const uint8_t* data, size_
     for (size_t n = 0; n + 1 < audPositions.size(); ++n) {
         size_t begin = audPositions[n];
         size_t end = audPositions[n + 1];
-        if (end > begin && g_decoder) {
-            HRESULT hr = g_decoder->FeedAccessUnit(pending.data() + begin, end - begin);
-            if (FAILED(hr)) {
-                wchar_t msg[128];
-                swprintf_s(msg, L"Decoder error 0x%08X", (unsigned)hr);
-                PostMessage(g_hwnd, WM_APP_STATUS, 0, (LPARAM)_wcsdup(msg));
-            }
+        if (end > begin) {
+            std::vector<uint8_t> au(pending.begin() + begin, pending.begin() + end);
+            if (!QueueAccessUnit(std::move(au))) return;
         }
     }
 
@@ -624,6 +735,99 @@ static void SendHello() {
     SendPacket(CONFIG, reinterpret_cast<const uint8_t*>(hello.data()), (uint32_t)hello.size());
 }
 
+static void DecoderThread() {
+    std::unique_ptr<H264Decoder> decoder;
+    int decoderW = 0, decoderH = 0;
+
+    while (g_running) {
+        std::vector<uint8_t> au;
+        {
+            std::unique_lock<std::mutex> lock(g_auMutex);
+            g_auCvNotEmpty.wait(lock, [] {
+                return !g_running || !g_auQueue.empty() || g_decoderResetRequested.load();
+            });
+            if (!g_running) break;
+
+            if (g_decoderResetRequested.exchange(false)) {
+                g_auQueue.clear();
+                lock.unlock();
+                g_auCvNotFull.notify_all();
+                if (decoder) decoder->Flush();
+                decoder.reset();
+                decoderW = decoderH = 0;
+                Logf(L"decoder reset");
+                continue;
+            }
+
+            if (g_auQueue.empty()) continue;
+            au = std::move(g_auQueue.front());
+            g_auQueue.pop_front();
+        }
+        g_auCvNotFull.notify_one();
+
+        int w = g_streamWidth;
+        int h = g_streamHeight;
+        if (!decoder || decoderW != w || decoderH != h) {
+            if (decoder) decoder->Flush();
+            decoder = std::make_unique<H264Decoder>();
+            HRESULT hr = decoder->Initialize(&g_presenter, w, h);
+            if (FAILED(hr)) {
+                g_lastHr = (unsigned long)hr;
+                ++g_decoderErrors;
+                Logf(L"decoder init failed hr=0x%08X size=%dx%d", (unsigned)hr, w, h);
+                decoder.reset();
+                continue;
+            }
+            decoderW = w;
+            decoderH = h;
+            Logf(L"decoder initialized size=%dx%d", w, h);
+            PostMessage(g_hwnd, WM_APP_STATUS, 0, (LPARAM)_wcsdup(L""));
+        }
+
+        HRESULT hr = decoder->FeedAccessUnit(au.data(), au.size());
+        if (FAILED(hr) && hr != MF_E_SHUTDOWN) {
+            g_lastHr = (unsigned long)hr;
+            ++g_decoderErrors;
+            Logf(L"decoder feed failed hr=0x%08X au_bytes=%llu",
+                 (unsigned)hr, (unsigned long long)au.size());
+            wchar_t msg[128];
+            swprintf_s(msg, L"Decoder error 0x%08X", (unsigned)hr);
+            PostMessage(g_hwnd, WM_APP_STATUS, 0, (LPARAM)_wcsdup(msg));
+            decoder->Flush();
+            decoder.reset();
+        }
+    }
+}
+
+static void PresentThread() {
+    while (g_running) {
+        ComPtr<IMFSample> sample;
+        {
+            std::unique_lock<std::mutex> lock(g_presentMutex);
+            g_presentCvNotEmpty.wait(lock, [] {
+                return !g_running || !g_presentQueue.empty();
+            });
+            if (!g_running) break;
+            sample = std::move(g_presentQueue.front());
+            g_presentQueue.pop_front();
+        }
+        g_presentCvNotFull.notify_one();
+
+        auto started = std::chrono::steady_clock::now();
+        HRESULT hr = g_presenter.PresentSample(sample.Get());
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        if (ms >= 50) {
+            ++g_presentStalls;
+            Logf(L"slow present %lld ms hr=0x%08X", (long long)ms, (unsigned)hr);
+        }
+        if (FAILED(hr)) {
+            g_lastHr = (unsigned long)hr;
+            Logf(L"present failed hr=0x%08X", (unsigned)hr);
+        }
+    }
+}
+
 static void DiagnosticsThread() {
     uint64_t lastPackets = 0, lastAU = 0, lastDecoded = 0, lastPresented = 0;
     while (g_running) {
@@ -636,16 +840,27 @@ static void DiagnosticsThread() {
         uint64_t decoded = g_decodedFrames.load();
         uint64_t presented = g_presentedFrames.load();
         unsigned long hr = g_lastHr.load();
+        size_t auDepth = 0, presentDepth = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_auMutex);
+            auDepth = g_auQueue.size();
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_presentMutex);
+            presentDepth = g_presentQueue.size();
+        }
 
-        wchar_t line[320];
+        wchar_t line[384];
         swprintf_s(
             line,
-            L"PadDisplay | net %llu pkt / %.2f MB | AU %llu | dec %llu | present %llu | +%llu/%llu/%llu/%llu | hr 0x%08lX",
+            L"PadDisplay | net %llu / %.2f MB | AU %llu q%llu | dec %llu | present %llu q%llu | +%llu/%llu/%llu/%llu | hr 0x%08lX",
             (unsigned long long)packets,
             (double)bytes / (1024.0 * 1024.0),
             (unsigned long long)aus,
+            (unsigned long long)auDepth,
             (unsigned long long)decoded,
             (unsigned long long)presented,
+            (unsigned long long)presentDepth,
             (unsigned long long)(packets - lastPackets),
             (unsigned long long)(aus - lastAU),
             (unsigned long long)(decoded - lastDecoded),
@@ -654,6 +869,21 @@ static void DiagnosticsThread() {
         SetWindowTextW(g_hwnd, line);
         OutputDebugStringW(line);
         OutputDebugStringW(L"\n");
+        Logf(L"health net=%llu bytes=%llu au=%llu dec=%llu present=%llu aq=%llu pq=%llu aq_hi=%llu pq_hi=%llu dec_stall=%llu present_stall=%llu errors=%llu reconnects=%llu hr=0x%08lX",
+             (unsigned long long)packets,
+             (unsigned long long)bytes,
+             (unsigned long long)aus,
+             (unsigned long long)decoded,
+             (unsigned long long)presented,
+             (unsigned long long)auDepth,
+             (unsigned long long)presentDepth,
+             (unsigned long long)g_auQueueHighWater.load(),
+             (unsigned long long)g_presentQueueHighWater.load(),
+             (unsigned long long)g_decodeStalls.load(),
+             (unsigned long long)g_presentStalls.load(),
+             (unsigned long long)g_decoderErrors.load(),
+             (unsigned long long)g_reconnects.load(),
+             hr);
 
         lastPackets = packets;
         lastAU = aus;
@@ -689,6 +919,8 @@ static void NetworkThread() {
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
         g_client = s;
         g_connected = true;
+        ++g_reconnects;
+        Logf(L"host connected");
         g_videoPackets = 0;
         g_videoBytes = 0;
         g_accessUnits = 0;
@@ -713,36 +945,33 @@ static void NetworkThread() {
                 std::string json(payload.begin(), payload.end());
                 int w = JsonInt(json, "width", 1366);
                 int h = JsonInt(json, "height", 768);
-                if (w > 0 && h > 0 && (w != g_streamWidth || h != g_streamHeight || !g_decoder)) {
-                    g_streamWidth = w; g_streamHeight = h;
-                    auto decoder = std::make_unique<H264Decoder>();
-                    HRESULT hr = decoder->Initialize(&g_presenter, w, h);
-                    if (SUCCEEDED(hr)) {
-                        g_decoder = std::move(decoder);
-                        PostMessage(g_hwnd, WM_APP_STATUS, 0, (LPARAM)_wcsdup(L""));
-                    } else {
-                        wchar_t msg[160];
-                        swprintf_s(msg, L"Hardware H.264 decoder unavailable\n0x%08X", (unsigned)hr);
-                        PostMessage(g_hwnd, WM_APP_STATUS, 0, (LPARAM)_wcsdup(msg));
-                    }
+                if (w > 0 && h > 0 && (w != g_streamWidth || h != g_streamHeight)) {
+                    g_streamWidth = w;
+                    g_streamHeight = h;
+                    g_decoderResetRequested = true;
+                    g_auCvNotEmpty.notify_one();
+                    Logf(L"stream config %dx%d", w, h);
                 }
             } else if (type == VIDEO_H264) {
                 ++g_videoPackets;
                 g_videoBytes += payload.size();
-                if (!g_decoder) {
-                    auto decoder = std::make_unique<H264Decoder>();
-                    HRESULT hr = decoder->Initialize(&g_presenter, g_streamWidth, g_streamHeight);
-                    if (SUCCEEDED(hr)) g_decoder = std::move(decoder);
-                }
-                if (g_decoder) FeedAnnexB(annexb, payload.data(), payload.size());
+                FeedAnnexB(annexb, payload.data(), payload.size());
             } else if (type == DISCONNECT) {
                 break;
             }
         }
 
         g_connected = false;
-        if (g_decoder) g_decoder->Flush();
-        g_decoder.reset();
+        g_decoderResetRequested = true;
+        g_auCvNotEmpty.notify_one();
+        g_auCvNotFull.notify_all();
+        g_presentCvNotEmpty.notify_one();
+        g_presentCvNotFull.notify_all();
+        {
+            std::lock_guard<std::mutex> lock(g_presentMutex);
+            g_presentQueue.clear();
+        }
+        Logf(L"host disconnected");
         shutdown(s, SD_BOTH);
         closesocket(s);
         g_client = INVALID_SOCKET;
@@ -915,6 +1144,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) return 1;
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return 2;
     if (FAILED(MFStartup(MF_VERSION))) return 3;
+    InitLog();
+    Logf(L"receiver start");
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
@@ -942,6 +1173,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     SetForegroundWindow(g_hwnd);
 
     std::thread network(NetworkThread);
+    std::thread decoder(DecoderThread);
+    std::thread presenter(PresentThread);
     std::thread diagnostics(DiagnosticsThread);
 
     MSG msg{};
@@ -952,9 +1185,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
     g_running = false;
     if (g_client != INVALID_SOCKET) shutdown(g_client, SD_BOTH);
+    g_auCvNotEmpty.notify_all();
+    g_auCvNotFull.notify_all();
+    g_presentCvNotEmpty.notify_all();
+    g_presentCvNotFull.notify_all();
     if (network.joinable()) network.join();
+    if (decoder.joinable()) decoder.join();
+    if (presenter.joinable()) presenter.join();
     if (diagnostics.joinable()) diagnostics.join();
 
+    Logf(L"receiver stop");
+    CloseLog();
     MFShutdown();
     CoUninitialize();
     WSACleanup();
