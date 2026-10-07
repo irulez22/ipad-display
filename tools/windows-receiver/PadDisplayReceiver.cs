@@ -18,6 +18,7 @@ class PadDisplayReceiver : Form
     const byte TOUCH_V1 = 0x10;
 
     readonly PictureBox picture = new PictureBox();
+    readonly Label overlay = new Label();
     readonly Label status = new Label();
     readonly Button fullscreen = new Button();
     readonly Button stop = new Button();
@@ -59,6 +60,13 @@ class PadDisplayReceiver : Form
         picture.BackColor = Color.Black;
         picture.SizeMode = PictureBoxSizeMode.Zoom;
 
+        overlay.Dock = DockStyle.Fill;
+        overlay.BackColor = Color.Black;
+        overlay.ForeColor = Color.White;
+        overlay.TextAlign = ContentAlignment.MiddleCenter;
+        overlay.Font = new Font("Segoe UI", 18, FontStyle.Regular);
+        overlay.Text = "PadDisplay Receiver\r\n\r\nWaiting for host connection on TCP 4822...";
+
         var bar = new FlowLayoutPanel();
         bar.Dock = DockStyle.Top;
         bar.Height = 38;
@@ -78,7 +86,10 @@ class PadDisplayReceiver : Form
         bar.Controls.Add(fullscreen);
         bar.Controls.Add(stop);
         Controls.Add(picture);
+        Controls.Add(overlay);
         Controls.Add(bar);
+        overlay.BringToFront();
+        bar.BringToFront();
 
         picture.MouseDown += PictureMouseDown;
         picture.MouseMove += PictureMouseMove;
@@ -111,6 +122,7 @@ class PadDisplayReceiver : Form
             while (running)
             {
                 SetStatus("Listening on TCP 4822...");
+                SetOverlay("PadDisplay Receiver\r\n\r\nWaiting for host connection on TCP 4822...");
                 var c = listener.AcceptTcpClient();
                 if (!running) break;
                 DisconnectClient();
@@ -120,6 +132,7 @@ class PadDisplayReceiver : Form
                 connected = true;
                 SetStopEnabled(true);
                 SetStatus("Host connected - waiting for CONFIG...");
+                SetOverlay("Host connected\r\nWaiting for stream...");
                 SendHello();
 
                 receiveThread = new Thread(ReceiveLoop);
@@ -165,6 +178,7 @@ class PadDisplayReceiver : Form
                         StartDecoder();
                     }
                     SetStatus("Connected • " + frameWidth + "x" + frameHeight + " • H.264");
+                    SetOverlay(null);
                 }
                 else if (type == VIDEO_H264)
                 {
@@ -338,7 +352,10 @@ class PadDisplayReceiver : Form
         client = null;
         StopDecoder();
         SetStopEnabled(false);
-        if (running) SetStatus("Listening on TCP 4822...");
+        if (running) {
+            SetStatus("Listening on TCP 4822...");
+            SetOverlay("PadDisplay Receiver\r\n\r\nWaiting for host connection on TCP 4822...");
+        }
     }
 
     void StopDecoder()
@@ -421,6 +438,24 @@ class PadDisplayReceiver : Form
             catch {}
         }
         return null;
+    }
+
+    void SetOverlay(string text)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke((Action<string>)SetOverlay, text); return; }
+        if (String.IsNullOrEmpty(text))
+        {
+            overlay.Visible = false;
+            picture.BringToFront();
+        }
+        else
+        {
+            overlay.Text = text;
+            overlay.Visible = true;
+            overlay.BringToFront();
+            Controls[Controls.Count - 1].BringToFront();
+        }
     }
 
     void SetStatus(string text)
