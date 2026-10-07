@@ -74,6 +74,7 @@ class PadDisplayReceiver : Form
         bar.Dock = DockStyle.Top;
         bar.Height = 38;
         bar.Padding = new Padding(6, 5, 6, 4);
+        bar.Visible = false;
 
         status.AutoSize = true;
         status.Text = "Listening on TCP 4822...";
@@ -125,7 +126,7 @@ class PadDisplayReceiver : Form
             while (running)
             {
                 SetStatus("Listening on TCP 4822...");
-                SetOverlay("PadDisplay Receiver\\r\\n\\r\\nWaiting for host connection\\r\\nTCP 4822");
+                SetOverlay("PadDisplay Receiver\r\n\r\nWaiting for host connection\r\nTCP 4822");
                 var c = listener.AcceptTcpClient();
                 if (!running) break;
                 DisconnectClient();
