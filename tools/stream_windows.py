@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 VIDEO_H264 = 0x01
 DISCONNECT = 0x04
@@ -586,23 +587,33 @@ def inject_keyboard_packet(payload):
 
 
 def input_loop(sock, monitor_rect, stats=None):
-    if monitor_rect is None:
-        print("Touch: matching stream monitor not found; touch input disabled.")
-        return
-
-    try:
-        injector = NativeTouchInjector(monitor_rect)
-    except Exception as exc:
-        print("Touch: native injection unavailable: %s" % exc)
-        return
-
-    print("Touch: native Windows multi-touch mapped to monitor rect %s" % (monitor_rect,))
-    print("Touch injector: %s" % ("synthetic pointer device" if injector.synthetic_device is not None else "legacy InjectTouchInput fallback"))
-    print("Touch ABI: POINTER_INFO=%d bytes, POINTER_TOUCH_INFO=%d bytes" % (
-        ctypes.sizeof(POINTER_INFO), ctypes.sizeof(POINTER_TOUCH_INFO)
-    ))
+    # Laptop mouse/keyboard input must never depend on the optional touch
+    # injector. Touch is initialized lazily and only used for TOUCH_* packets.
+    injector = None
+    touch_init_attempted = False
     saw_touch = False
 
+    def get_touch_injector():
+        nonlocal injector, touch_init_attempted
+        if touch_init_attempted:
+            return injector
+        touch_init_attempted = True
+        if monitor_rect is None:
+            print("Touch: no matching stream monitor; touch packets disabled (mouse/keyboard remain enabled).")
+            return None
+        try:
+            injector = NativeTouchInjector(monitor_rect)
+            print("Touch: native Windows multi-touch mapped to monitor rect %s" % (monitor_rect,))
+            print("Touch injector: %s" % (
+                "synthetic pointer device" if injector.synthetic_device is not None
+                else "legacy InjectTouchInput fallback"
+            ))
+        except Exception as exc:
+            print("Touch: native injection unavailable: %s (mouse/keyboard remain enabled)." % exc)
+            injector = None
+        return injector
+
+    print("Input: laptop mouse, wheel and keyboard enabled.")
     try:
         while True:
             header = read_exactly(sock, 5)
@@ -616,7 +627,7 @@ def input_loop(sock, monitor_rect, stats=None):
             if packet_type == CONFIG:
                 try:
                     text = payload.decode("utf-8", "replace")
-                    print("iPad hello: %s" % text, flush=True)
+                    print("Client hello: %s" % text, flush=True)
                     try:
                         hello = json.loads(text)
                         if stats is not None and isinstance(hello, dict):
@@ -631,25 +642,28 @@ def input_loop(sock, monitor_rect, stats=None):
             elif packet_type == KEYBOARD_V1:
                 inject_keyboard_packet(payload)
             elif packet_type == TOUCH_V2:
+                touch = get_touch_injector()
                 contacts = parse_touch_v2(payload)
-                if contacts:
+                if touch is not None and contacts:
                     if not saw_touch:
-                        print("Touch: received first TOUCH_V2 packet from iPad (%d contact(s))." % len(contacts))
+                        print("Touch: received first TOUCH_V2 packet (%d contact(s))." % len(contacts))
                         saw_touch = True
-                    injector.inject(contacts)
+                    touch.inject(contacts)
                     if stats is not None:
                         stats.add_touch()
             elif packet_type == TOUCH_V1 and len(payload) == 5:
-                phase = payload[0]
-                x = struct.unpack(">H", payload[1:3])[0] / 65535.0
-                y = struct.unpack(">H", payload[3:5])[0] / 65535.0
-                injector.inject([(0, phase, x, y)])
-                if stats is not None:
-                    stats.add_touch()
+                touch = get_touch_injector()
+                if touch is not None:
+                    phase = payload[0]
+                    x = struct.unpack(">H", payload[1:3])[0] / 65535.0
+                    y = struct.unpack(">H", payload[3:5])[0] / 65535.0
+                    touch.inject([(0, phase, x, y)])
+                    if stats is not None:
+                        stats.add_touch()
     except (OSError, RuntimeError):
         return
     except Exception as exc:
-        print("Touch injection error: %s" % exc)
+        print("Input injection error: %s" % exc)
 
 
 def audio_loop(host, port, helper_path, stats=None):
@@ -753,6 +767,7 @@ def main():
     p.add_argument("--status-file", default=None, help="Write live JSON telemetry for the launcher")
     p.add_argument("--transport", default="unknown", help="Transport label for telemetry")
     args = p.parse_args()
+    session_id = uuid.uuid4().hex
 
     if shutil.which(args.ffmpeg) is None and args.ffmpeg == "ffmpeg":
         sys.exit("ffmpeg was not found in PATH.")
@@ -898,6 +913,8 @@ def main():
         hello = json.dumps({
             "protocol": PROTOCOL_VERSION,
             "host": "windows",
+            "session_id": session_id,
+            "session_mode": "thin_client" if args.transport == "Windows" else "display",
             "audio_pcm_v2": True,
             "audio_port": args.audio_port,
             "width": width_i,
