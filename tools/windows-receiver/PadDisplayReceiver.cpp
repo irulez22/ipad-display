@@ -49,6 +49,8 @@ static constexpr uint8_t CONFIG = 0x03;
 static constexpr uint8_t DISCONNECT = 0x04;
 static constexpr uint8_t TOUCH_V1 = 0x10;
 static constexpr uint8_t TOUCH_V2 = 0x11;
+static constexpr uint8_t MOUSE_V1 = 0x12;
+static constexpr uint8_t KEYBOARD_V1 = 0x13;
 static constexpr UINT WM_APP_FRAME = WM_APP + 1;
 static constexpr UINT WM_APP_STATUS = WM_APP + 2;
 
@@ -1020,7 +1022,7 @@ static void ToggleFullscreen() {
     }
 }
 
-static void SendMouseTouch(uint8_t phase, int x, int y) {
+static void SendMousePacket(uint8_t action, uint8_t button, int x, int y, int16_t wheel = 0) {
     RECT rc{}; GetClientRect(g_hwnd, &rc);
     int w = std::max(1L, rc.right - rc.left);
     int h = std::max(1L, rc.bottom - rc.top);
@@ -1028,8 +1030,28 @@ static void SendMouseTouch(uint8_t phase, int x, int y) {
     y = std::clamp(y, 0, h - 1);
     uint16_t nx = (uint16_t)((uint64_t)x * 65535u / (uint64_t)std::max(1, w - 1));
     uint16_t ny = (uint16_t)((uint64_t)y * 65535u / (uint64_t)std::max(1, h - 1));
-    uint8_t p[5] = {phase, (uint8_t)(nx >> 8), (uint8_t)nx, (uint8_t)(ny >> 8), (uint8_t)ny};
-    SendPacket(TOUCH_V1, p, sizeof(p));
+
+    uint8_t p[8] = {
+        action,
+        button,
+        (uint8_t)(nx >> 8), (uint8_t)nx,
+        (uint8_t)(ny >> 8), (uint8_t)ny,
+        (uint8_t)(((uint16_t)wheel) >> 8), (uint8_t)wheel
+    };
+    SendPacket(MOUSE_V1, p, sizeof(p));
+}
+
+static void SendKeyboardPacket(uint8_t action, WPARAM wParam, LPARAM lParam) {
+    uint16_t vk = (uint16_t)(wParam & 0xFFFF);
+    uint16_t scan = (uint16_t)((lParam >> 16) & 0xFF);
+    uint8_t flags = (lParam & (1LL << 24)) ? 0x01 : 0x00;
+    uint8_t p[6] = {
+        action,
+        (uint8_t)(vk >> 8), (uint8_t)vk,
+        (uint8_t)(scan >> 8), (uint8_t)scan,
+        flags
+    };
+    SendPacket(KEYBOARD_V1, p, sizeof(p));
 }
 
 static void SendPointerFrame(UINT32 pointerId, uint8_t phase, int x, int y) {
@@ -1089,19 +1111,35 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         EndPaint(hwnd, &ps);
         return 0;
     }
+    case WM_MOUSEMOVE:
+        SendMousePacket(0, 0, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        return 0;
     case WM_LBUTTONDOWN:
         SetCapture(hwnd); mouseDown = true;
-        SendMouseTouch(0, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-        return 0;
-    case WM_MOUSEMOVE:
-        if (mouseDown) SendMouseTouch(1, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        SendMousePacket(1, 1, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         return 0;
     case WM_LBUTTONUP:
-        if (mouseDown) {
-            SendMouseTouch(2, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-            mouseDown = false; ReleaseCapture();
-        }
+        SendMousePacket(2, 1, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        if (mouseDown) { mouseDown = false; ReleaseCapture(); }
         return 0;
+    case WM_RBUTTONDOWN:
+        SendMousePacket(1, 2, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        return 0;
+    case WM_RBUTTONUP:
+        SendMousePacket(2, 2, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        return 0;
+    case WM_MBUTTONDOWN:
+        SendMousePacket(1, 3, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        return 0;
+    case WM_MBUTTONUP:
+        SendMousePacket(2, 3, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        return 0;
+    case WM_MOUSEWHEEL: {
+        POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ScreenToClient(hwnd, &pt);
+        SendMousePacket(3, 0, pt.x, pt.y, (int16_t)GET_WHEEL_DELTA_WPARAM(wParam));
+        return 0;
+    }
     case WM_POINTERDOWN:
     case WM_POINTERUPDATE:
     case WM_POINTERUP: {
@@ -1116,15 +1154,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
     case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
         if (wParam == VK_F11) {
             ToggleFullscreen();
             return 0;
         }
-        if (wParam == VK_ESCAPE) {
-            if (g_fullscreen) ToggleFullscreen();
+        if (wParam == VK_ESCAPE && g_fullscreen) {
+            ToggleFullscreen();
             return 0;
         }
-        break;
+        SendKeyboardPacket(0, wParam, lParam);
+        return 0;
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        if (wParam == VK_F11) return 0;
+        SendKeyboardPacket(1, wParam, lParam);
+        return 0;
     case WM_CLOSE:
         g_running = false;
         if (g_client != INVALID_SOCKET) shutdown(g_client, SD_BOTH);
