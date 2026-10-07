@@ -5,7 +5,8 @@
 #include <windowsx.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <mmsystem.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
 #include <d3d11.h>
 #include <d3d10.h>
 #include <dxgi1_2.h>
@@ -42,7 +43,6 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "wmcodecdspuuid.lib")
-#pragma comment(lib, "winmm.lib")
 
 using Microsoft::WRL::ComPtr;
 
@@ -248,19 +248,45 @@ static int JsonInt(const std::string& json, const char* key, int fallback) {
 class PcmAudioPlayer {
 public:
     HRESULT Initialize() {
+        HRESULT hr = CoCreateInstance(
+            __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+            IID_PPV_ARGS(&enumerator_));
+        if (FAILED(hr)) return hr;
+
+        hr = enumerator_->GetDefaultAudioEndpoint(eRender, eConsole, &device_);
+        if (FAILED(hr)) return hr;
+
+        hr = device_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                               reinterpret_cast<void**>(audio_.GetAddressOf()));
+        if (FAILED(hr)) return hr;
+
         WAVEFORMATEX fmt{};
         fmt.wFormatTag = WAVE_FORMAT_PCM;
         fmt.nChannels = 2;
         fmt.nSamplesPerSec = 48000;
         fmt.wBitsPerSample = 16;
-        fmt.nBlockAlign = fmt.nChannels * (fmt.wBitsPerSample / 8);
-        fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
+        fmt.nBlockAlign = 4;
+        fmt.nAvgBytesPerSec = 48000 * 4;
 
-        MMRESULT mm = waveOutOpen(&wave_, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL);
-        if (mm != MMSYSERR_NOERROR) return HRESULT_FROM_WIN32(mm);
+        const DWORD flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                            AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+        hr = audio_->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            flags,
+            500000, // 50 ms engine buffer; network queue is managed separately.
+            0,
+            &fmt,
+            nullptr);
+        if (FAILED(hr)) return hr;
 
-        blocks_.resize(6);
-        headers_.resize(6);
+        hr = audio_->GetBufferSize(&bufferFrames_);
+        if (FAILED(hr)) return hr;
+
+        hr = audio_->GetService(IID_PPV_ARGS(&render_));
+        if (FAILED(hr)) return hr;
+
+        running_ = true;
+        worker_ = std::thread(&PcmAudioPlayer::RenderLoop, this);
         return S_OK;
     }
 
@@ -269,48 +295,126 @@ public:
     }
 
     HRESULT Submit(const uint8_t* pcm, size_t bytes) {
-        if (!wave_ || !pcm || bytes == 0) return E_INVALIDARG;
-
-        size_t index = next_++ % headers_.size();
-        WAVEHDR& hdr = headers_[index];
-
-        if (hdr.dwFlags & WHDR_PREPARED) {
-            while (!(hdr.dwFlags & WHDR_DONE) && g_running) {
-                Sleep(1);
+        if (!pcm || bytes == 0 || (bytes % 4) != 0) return E_INVALIDARG;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // Cap network-side audio at 120 ms. If the renderer falls behind,
+            // discard oldest audio rather than allowing A/V latency to grow.
+            constexpr size_t MAX_AUDIO_BYTES = 48000 * 4 * 120 / 1000;
+            while (queue_.size() + bytes > MAX_AUDIO_BYTES && queue_.size() >= 4) {
+                for (int i = 0; i < 4; ++i) queue_.pop_front();
+                ++overflows_;
             }
-            waveOutUnprepareHeader(wave_, &hdr, sizeof(hdr));
-            ZeroMemory(&hdr, sizeof(hdr));
+            queue_.insert(queue_.end(), pcm, pcm + bytes);
         }
-
-        blocks_[index].assign(pcm, pcm + bytes);
-        hdr.lpData = reinterpret_cast<LPSTR>(blocks_[index].data());
-        hdr.dwBufferLength = static_cast<DWORD>(blocks_[index].size());
-
-        MMRESULT mm = waveOutPrepareHeader(wave_, &hdr, sizeof(hdr));
-        if (mm != MMSYSERR_NOERROR) return HRESULT_FROM_WIN32(mm);
-        mm = waveOutWrite(wave_, &hdr, sizeof(hdr));
-        if (mm != MMSYSERR_NOERROR) return HRESULT_FROM_WIN32(mm);
+        cv_.notify_one();
         return S_OK;
     }
 
     void Shutdown() {
-        if (!wave_) return;
-        waveOutReset(wave_);
-        for (auto& hdr : headers_) {
-            if (hdr.dwFlags & WHDR_PREPARED) {
-                waveOutUnprepareHeader(wave_, &hdr, sizeof(hdr));
-            }
-        }
-        waveOutClose(wave_);
-        wave_ = nullptr;
+        bool expected = true;
+        if (!running_.compare_exchange_strong(expected, false)) return;
+        cv_.notify_all();
+        if (worker_.joinable()) worker_.join();
+        if (audio_) audio_->Stop();
+        render_.Reset();
+        audio_.Reset();
+        device_.Reset();
+        enumerator_.Reset();
     }
 
+    uint64_t Underruns() const { return underruns_.load(); }
+    uint64_t Overflows() const { return overflows_.load(); }
+
 private:
-    HWAVEOUT wave_ = nullptr;
-    std::vector<std::vector<uint8_t>> blocks_;
-    std::vector<WAVEHDR> headers_;
-    size_t next_ = 0;
+    void RenderLoop() {
+        // Prebuffer ~30 ms so normal packet jitter does not turn into crackle.
+        const size_t startBytes = 48000 * 4 * 30 / 1000;
+        while (running_) {
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait_for(lock, std::chrono::milliseconds(5), [&] {
+                    return !running_ || queue_.size() >= startBytes;
+                });
+                if (!running_) return;
+                if (queue_.size() < startBytes) continue;
+            }
+            break;
+        }
+
+        HRESULT hr = audio_->Start();
+        if (FAILED(hr)) {
+            ++g_audioErrors;
+            Logf(L"audio start failed hr=0x%08X", (unsigned)hr);
+            return;
+        }
+
+        while (running_) {
+            UINT32 padding = 0;
+            hr = audio_->GetCurrentPadding(&padding);
+            if (FAILED(hr)) {
+                ++g_audioErrors;
+                Logf(L"audio padding failed hr=0x%08X", (unsigned)hr);
+                break;
+            }
+
+            UINT32 available = bufferFrames_ > padding ? bufferFrames_ - padding : 0;
+            if (available == 0) {
+                Sleep(2);
+                continue;
+            }
+
+            BYTE* dst = nullptr;
+            hr = render_->GetBuffer(available, &dst);
+            if (FAILED(hr)) {
+                ++g_audioErrors;
+                Logf(L"audio GetBuffer failed hr=0x%08X", (unsigned)hr);
+                break;
+            }
+
+            size_t wantedBytes = (size_t)available * 4;
+            size_t copied = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                copied = std::min(wantedBytes, queue_.size());
+                copied -= copied % 4;
+                for (size_t i = 0; i < copied; ++i) {
+                    dst[i] = queue_.front();
+                    queue_.pop_front();
+                }
+            }
+
+            if (copied < wantedBytes) {
+                memset(dst + copied, 0, wantedBytes - copied);
+                ++underruns_;
+            }
+
+            hr = render_->ReleaseBuffer(available, 0);
+            if (FAILED(hr)) {
+                ++g_audioErrors;
+                Logf(L"audio ReleaseBuffer failed hr=0x%08X", (unsigned)hr);
+                break;
+            }
+
+            Sleep(2);
+        }
+    }
+
+    ComPtr<IMMDeviceEnumerator> enumerator_;
+    ComPtr<IMMDevice> device_;
+    ComPtr<IAudioClient> audio_;
+    ComPtr<IAudioRenderClient> render_;
+    UINT32 bufferFrames_ = 0;
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<uint8_t> queue_;
+    std::thread worker_;
+    std::atomic<bool> running_{false};
+    std::atomic<uint64_t> underruns_{0};
+    std::atomic<uint64_t> overflows_{0};
 };
+
 
 class D3DPresenter {
 public:
@@ -1062,10 +1166,14 @@ static void AudioThread() {
             }
         }
 
+        uint64_t underruns = player.Underruns();
+        uint64_t overflows = player.Overflows();
         player.Shutdown();
         shutdown(s, SD_BOTH);
         closesocket(s);
-        Logf(L"audio client disconnected");
+        Logf(L"audio client disconnected underruns=%llu overflows=%llu",
+             (unsigned long long)underruns,
+             (unsigned long long)overflows);
     }
 
     closesocket(listenSock);
