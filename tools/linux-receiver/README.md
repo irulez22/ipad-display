@@ -23,8 +23,8 @@ You want `vaapi` in the FFmpeg list and an H.264 decode profile in `vainfo`.
 
 ```bash
 cd ~/ipad-display
-./tools/linux-receiver/build.sh
-./tools/linux-receiver/run.sh
+sh tools/linux-receiver/build.sh
+sh tools/linux-receiver/run.sh
 ```
 
 The client listens on TCP 4822 for video/control and TCP 4824 for PCM audio.
