@@ -137,39 +137,45 @@ int wmain()
     hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void **)&audio);
     if (FAILED(hr)) goto fail;
 
-    // Log the endpoint mix format for diagnostics, but do not manually parse or
-    // resample it. Ask the Windows shared audio engine to deliver exactly the
-    // wire format PadDisplay uses: 48 kHz stereo signed 16-bit PCM.
     hr = audio->GetMixFormat(&mix);
-    if (SUCCEEDED(hr) && mix) {
-        fwprintf(stderr, L"WASAPI engine mix: %lu Hz, %u ch, %u-bit tag=%u; requesting 48000 Hz stereo s16le\n",
-                 mix->nSamplesPerSec, mix->nChannels, mix->wBitsPerSample, mix->wFormatTag);
+    if (FAILED(hr) || !mix) goto fail;
+
+    AudioFormatInfo inputFmt;
+    if (!parse_format(mix, inputFmt)) {
+        fwprintf(stderr, L"Unsupported Windows mix format: tag=%u channels=%u rate=%lu bits=%u align=%u\n",
+                 mix->wFormatTag, mix->nChannels, mix->nSamplesPerSec,
+                 mix->wBitsPerSample, mix->nBlockAlign);
+        hr = E_FAIL;
+        goto fail;
     }
 
-    WAVEFORMATEX target{};
-    target.wFormatTag = WAVE_FORMAT_PCM;
-    target.nChannels = 2;
-    target.nSamplesPerSec = 48000;
-    target.wBitsPerSample = 16;
-    target.nBlockAlign = (WORD)(target.nChannels * target.wBitsPerSample / 8);
-    target.nAvgBytesPerSec = target.nSamplesPerSec * target.nBlockAlign;
-    target.cbSize = 0;
+    const char *formatName = nullptr;
+    if (inputFmt.isFloat && inputFmt.containerBits == 32) formatName = "f32";
+    else if (inputFmt.isPCM && inputFmt.containerBits == 16) formatName = "s16";
+    else if (inputFmt.isPCM && inputFmt.containerBits == 32) formatName = "s32";
+    else {
+        fwprintf(stderr, L"PadDisplay cannot stream native WASAPI format yet: %lu Hz, %u ch, %u-bit\n",
+                 inputFmt.sampleRate, inputFmt.channels, inputFmt.containerBits);
+        hr = E_FAIL;
+        goto fail;
+    }
 
-    const DWORD flags =
-        AUDCLNT_STREAMFLAGS_LOOPBACK |
-        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-        AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    fwprintf(stderr, L"WASAPI native loopback: %lu Hz, %u ch, %u-bit%s, block=%u\n",
+             inputFmt.sampleRate, inputFmt.channels, inputFmt.containerBits,
+             inputFmt.isFloat ? L" float" : L" PCM", inputFmt.blockAlign);
 
+    // Loopback capture is most reliable when initialized with the endpoint's
+    // own shared-mode mix format. Linux performs conversion with SDL_AudioStream.
     hr = audio->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
-        flags,
+        AUDCLNT_STREAMFLAGS_LOOPBACK,
         1000000,
         0,
-        &target,
+        mix,
         nullptr
     );
     if (FAILED(hr)) {
-        fwprintf(stderr, L"WASAPI Initialize failed for 48k stereo s16le: 0x%08lx\n", (unsigned long)hr);
+        fwprintf(stderr, L"WASAPI loopback Initialize failed: 0x%08lx\n", (unsigned long)hr);
         goto fail;
     }
 
@@ -180,7 +186,11 @@ int wmain()
     if (FAILED(hr)) goto fail;
 
     setvbuf(stdout, nullptr, _IONBF, 0);
-    fwprintf(stderr, L"WASAPI loopback active: Windows engine conversion -> 48000 Hz stereo s16le\n");
+
+    // One ASCII metadata line precedes the binary PCM stream. stream_windows.py
+    // consumes this line and forwards a compact AUDIO_FORMAT packet to Linux.
+    printf("PDAUDIO %lu %u %s %u\n",
+           inputFmt.sampleRate, inputFmt.channels, formatName, inputFmt.blockAlign);
 
     for (;;) {
         UINT32 packetFrames = 0;
@@ -199,7 +209,7 @@ int wmain()
             hr = capture->GetBuffer(&data, &frames, &captureFlags, nullptr, nullptr);
             if (FAILED(hr)) goto done;
 
-            const size_t bytes = (size_t)frames * target.nBlockAlign;
+            const size_t bytes = (size_t)frames * inputFmt.blockAlign;
             if (captureFlags & AUDCLNT_BUFFERFLAGS_SILENT) {
                 std::vector<uint8_t> silence(bytes, 0);
                 if (bytes && fwrite(silence.data(), 1, bytes, stdout) != bytes) {
@@ -223,6 +233,8 @@ done:
     if (audio) audio->Stop();
 
 fail:
+    if (FAILED(hr))
+        fwprintf(stderr, L"WASAPI helper exiting with HRESULT 0x%08lx\n", (unsigned long)hr);
     if (mix) CoTaskMemFree(mix);
     safe_release(&capture);
     safe_release(&audio);
