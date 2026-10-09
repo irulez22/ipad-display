@@ -1,7 +1,7 @@
 @echo off
 setlocal
 echo === PadDisplay iPad rebuild ===
-wsl -d Ubuntu -- bash -lc "cd ~/ipad-display && ./tools/rebuild-ipad.sh"
+wsl -d Ubuntu -- bash -lc "cd ~/ipad-display && bash ./tools/rebuild-ipad.sh"
 set ERR=%ERRORLEVEL%
 echo.
 if not "%ERR%"=="0" (
