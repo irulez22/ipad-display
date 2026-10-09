@@ -347,68 +347,67 @@ static void RenderPendingFrame(){
         pending_frame.ready=false;
     }
 
-    if(frame.w<=0 || frame.h<=0 || frame.pitch<=0 || frame.bgra.empty() || !renderer_) return;
+    if(frame.w<=0 || frame.h<=0 || frame.pitch<=0 || frame.bgra.empty() || !window_) return;
 
-    if(!texture_ || frame.w!=stream_w || frame.h!=stream_h){
-        stream_w=frame.w;
-        stream_h=frame.h;
-        if(texture_) SDL_DestroyTexture(texture_);
-        texture_=SDL_CreateTexture(renderer_,SDL_PIXELFORMAT_ARGB8888,
-                                   SDL_TEXTUREACCESS_STREAMING,stream_w,stream_h);
-        if(!texture_){
-            Log(std::string("SDL_CreateTexture failed: ")+SDL_GetError());
-            return;
-        }
-        Log("video mode: "+std::to_string(stream_w)+"x"+std::to_string(stream_h)+" BGRA");
-    }
-
-    if(SDL_UpdateTexture(texture_,nullptr,frame.bgra.data(),frame.pitch)!=0){
-        Log(std::string("SDL_UpdateTexture failed: ")+SDL_GetError());
+    SDL_Surface* dst=SDL_GetWindowSurface(window_);
+    if(!dst){
+        Log(std::string("SDL_GetWindowSurface failed: ")+SDL_GetError());
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(render_mtx);
-        SDL_SetRenderDrawColor(renderer_,0,0,0,255);
-        if(SDL_RenderClear(renderer_)!=0){
-            Log(std::string("SDL_RenderClear failed: ")+SDL_GetError());
-            return;
-        }
-        if(SDL_RenderCopy(renderer_,texture_,nullptr,nullptr)!=0){
-            Log(std::string("SDL_RenderCopy failed: ")+SDL_GetError());
-            return;
-        }
-        SDL_RenderPresent(renderer_);
+    SDL_Surface* src=SDL_CreateRGBSurfaceWithFormatFrom(
+        frame.bgra.data(),frame.w,frame.h,32,frame.pitch,SDL_PIXELFORMAT_ARGB8888);
+    if(!src){
+        Log(std::string("SDL_CreateRGBSurfaceWithFormatFrom failed: ")+SDL_GetError());
+        return;
+    }
+
+    SDL_Rect out{0,0,dst->w,dst->h};
+    if(SDL_BlitScaled(src,nullptr,dst,&out)!=0){
+        Log(std::string("SDL_BlitScaled failed: ")+SDL_GetError());
+        SDL_FreeSurface(src);
+        return;
+    }
+    SDL_FreeSurface(src);
+
+    if(SDL_UpdateWindowSurface(window_)!=0){
+        Log(std::string("SDL_UpdateWindowSurface failed: ")+SDL_GetError());
+        return;
+    }
+
+    if(frame.w!=stream_w || frame.h!=stream_h){
+        stream_w=frame.w;
+        stream_h=frame.h;
+        Log("video mode: "+std::to_string(stream_w)+"x"+std::to_string(stream_h)+" window-surface");
     }
     ++frames;
 }
 
 static void DrawStatus(const char* message){
-    if(!renderer_) return;
-    std::lock_guard<std::mutex> lock(render_mtx);
-    SDL_SetRenderDrawColor(renderer_,18,18,22,255);
-    SDL_RenderClear(renderer_);
+    if(!window_) return;
+    SDL_Surface* dst=SDL_GetWindowSurface(window_);
+    if(!dst) return;
 
-    int w=0,h=0;
-    SDL_GetRendererOutputSize(renderer_,&w,&h);
-    SDL_Rect panel{std::max(20,w/2-330),std::max(20,h/2-90),std::min(660,w-40),180};
-    SDL_SetRenderDrawColor(renderer_,35,35,42,255);
-    SDL_RenderFillRect(renderer_,&panel);
+    SDL_FillRect(dst,nullptr,SDL_MapRGB(dst->format,18,18,22));
+
+    SDL_Rect panel{
+        std::max(20,dst->w/2-330),
+        std::max(20,dst->h/2-90),
+        std::min(660,dst->w-40),
+        180
+    };
+    SDL_FillRect(dst,&panel,SDL_MapRGB(dst->format,35,35,42));
 
     if(status_font){
         SDL_Color fg{235,235,240,255};
-        SDL_Surface* s=TTF_RenderUTF8_Blended(status_font,message,fg);
-        if(s){
-            SDL_Texture* t=SDL_CreateTextureFromSurface(renderer_,s);
-            if(t){
-                SDL_Rect dst{w/2-s->w/2,h/2-s->h/2,s->w,s->h};
-                SDL_RenderCopy(renderer_,t,nullptr,&dst);
-                SDL_DestroyTexture(t);
-            }
-            SDL_FreeSurface(s);
+        SDL_Surface* text=TTF_RenderUTF8_Blended(status_font,message,fg);
+        if(text){
+            SDL_Rect pos{dst->w/2-text->w/2,dst->h/2-text->h/2,text->w,text->h};
+            SDL_BlitSurface(text,nullptr,dst,&pos);
+            SDL_FreeSurface(text);
         }
     }
-    SDL_RenderPresent(renderer_);
+    SDL_UpdateWindowSurface(window_);
 }
 
 int main(){
@@ -420,12 +419,11 @@ int main(){
     if(TTF_Init()!=0) Log(std::string("SDL_ttf init failed: ")+TTF_GetError());
     window_=SDL_CreateWindow("PadDisplay Linux Client",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,1366,768,
                              SDL_WINDOW_SHOWN|SDL_WINDOW_RESIZABLE|SDL_WINDOW_FULLSCREEN_DESKTOP);
-    renderer_=SDL_CreateRenderer(window_,-1,SDL_RENDERER_SOFTWARE);
-    if(!window_||!renderer_){fprintf(stderr,"SDL video failed: %s\n",SDL_GetError());return 1;}
-    SDL_RendererInfo renderer_info{};
-    if(SDL_GetRendererInfo(renderer_,&renderer_info)==0){
-        Log(std::string("SDL renderer: ")+(renderer_info.name?renderer_info.name:"unknown"));
-    }
+    if(!window_){fprintf(stderr,"SDL window failed: %s\n",SDL_GetError());return 1;}
+    SDL_Surface* initial_surface=SDL_GetWindowSurface(window_);
+    if(!initial_surface){fprintf(stderr,"SDL window surface failed: %s\n",SDL_GetError());return 1;}
+    Log(std::string("SDL presentation: window surface ")+
+        std::to_string(initial_surface->w)+"x"+std::to_string(initial_surface->h));
     status_font=TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",36);
     if(!status_font) Log(std::string("status font unavailable: ")+TTF_GetError());
     SDL_SetWindowTitle(window_,"PadDisplay - Waiting for host...");
@@ -484,7 +482,6 @@ int main(){
     net.join(); dec.join(); aud.join();
     if(audio_dev) SDL_CloseAudioDevice(audio_dev);
     if(texture_) SDL_DestroyTexture(texture_);
-    if(renderer_) SDL_DestroyRenderer(renderer_);
     if(status_font) TTF_CloseFont(status_font);
     if(window_) SDL_DestroyWindow(window_);
     if(hw_device) av_buffer_unref(&hw_device);
