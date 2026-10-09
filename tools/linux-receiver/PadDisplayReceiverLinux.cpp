@@ -760,6 +760,8 @@ int main(){
     bool last_connected=false;
     while(running){
         SDL_Event e{};
+        bool have_motion=false;
+        int motion_x=0,motion_y=0;
         while(SDL_PollEvent(&e)){
             if(e.type==SDL_QUIT) running=false;
             else if(e.type==SDL_KEYDOWN||e.type==SDL_KEYUP){
@@ -768,14 +770,20 @@ int main(){
                 else if(!up&&e.key.keysym.sym==SDLK_F11){fullscreen_=!fullscreen_;SDL_SetWindowFullscreen(window_,fullscreen_?SDL_WINDOW_FULLSCREEN_DESKTOP:0);}
                 else if(!up&&e.key.keysym.sym==SDLK_ESCAPE&&fullscreen_){fullscreen_=false;SDL_SetWindowFullscreen(window_,0);}
                 else SendKey(e.key,up);
-            } else if(e.type==SDL_MOUSEMOTION) SendMouse(0,0,e.motion.x,e.motion.y,0);
-            else if(e.type==SDL_MOUSEBUTTONDOWN||e.type==SDL_MOUSEBUTTONUP){
+            } else if(e.type==SDL_MOUSEMOTION){
+                // Coalesce motion bursts and send only the newest absolute
+                // position once per render loop. Buttons/wheel remain immediate.
+                have_motion=true;
+                motion_x=e.motion.x;
+                motion_y=e.motion.y;
+            } else if(e.type==SDL_MOUSEBUTTONDOWN||e.type==SDL_MOUSEBUTTONUP){
                 uint8_t b=e.button.button==SDL_BUTTON_LEFT?1:e.button.button==SDL_BUTTON_RIGHT?2:e.button.button==SDL_BUTTON_MIDDLE?3:0;
                 if(b) SendMouse(e.type==SDL_MOUSEBUTTONDOWN?1:2,b,e.button.x,e.button.y,0);
             } else if(e.type==SDL_MOUSEWHEEL){
                 int x=0,y=0;SDL_GetMouseState(&x,&y);SendMouse(3,0,x,y,e.wheel.y*120);
             }
         }
+        if(have_motion) SendMouse(0,0,motion_x,motion_y,0);
         bool now_connected=connected.load();
         if(now_connected!=last_connected){
             last_connected=now_connected;
