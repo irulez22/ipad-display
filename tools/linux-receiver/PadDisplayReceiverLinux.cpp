@@ -621,7 +621,21 @@ int main(){
     gl_context=SDL_GL_CreateContext(window_);
     if(!gl_context){fprintf(stderr,"OpenGL context failed: %s\n",SDL_GetError());return 1;}
     if(SDL_GL_MakeCurrent(window_,gl_context)!=0){fprintf(stderr,"OpenGL make-current failed: %s\n",SDL_GetError());return 1;}
-    SDL_GL_SetSwapInterval(0);
+    // Prefer adaptive vsync: synchronize swaps to the display refresh to
+    // eliminate tearing, but allow a late frame to swap immediately when the
+    // driver supports EXT_swap_control_tear. Fall back to ordinary vsync.
+    int swap_interval=0;
+    if(SDL_GL_SetSwapInterval(-1)==0){
+        swap_interval=-1;
+        Log("OpenGL swap interval: adaptive vsync");
+    } else if(SDL_GL_SetSwapInterval(1)==0){
+        swap_interval=1;
+        Log("OpenGL swap interval: vsync");
+    } else {
+        SDL_GL_SetSwapInterval(0);
+        Log(std::string("OpenGL swap interval: unsynchronized (vsync unavailable): ")+SDL_GetError());
+    }
+    (void)swap_interval;
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glMatrixMode(GL_PROJECTION);
