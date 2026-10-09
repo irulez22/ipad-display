@@ -57,7 +57,8 @@ static std::mutex render_mtx;
 
 struct PendingVideoFrame {
     int w=0, h=0;
-    std::vector<uint8_t> yuv420;
+    int pitch=0;
+    std::vector<uint8_t> bgra;
     bool ready=false;
 };
 static std::mutex pending_frame_mtx;
@@ -165,33 +166,24 @@ struct Decoder {
         }
 
         const int w=use->width, h=use->height;
-        const int bytes=av_image_get_buffer_size(AV_PIX_FMT_YUV420P,w,h,1);
-        if(bytes<=0) return;
+        const int pitch=w*4;
+        if(w<=0 || h<=0) return;
 
-        std::vector<uint8_t> buf((size_t)bytes);
-        uint8_t* dst[4]{};
-        int lines[4]{};
-        if(av_image_fill_arrays(dst,lines,buf.data(),AV_PIX_FMT_YUV420P,w,h,1)<0) return;
+        std::vector<uint8_t> buf((size_t)pitch*(size_t)h);
+        uint8_t* dst[4]={buf.data(),nullptr,nullptr,nullptr};
+        int lines[4]={pitch,0,0,0};
 
-        if(use->format==AV_PIX_FMT_YUV420P){
-            for(int y=0;y<h;++y) memcpy(dst[0]+y*lines[0],use->data[0]+y*use->linesize[0],(size_t)w);
-            const int cw=(w+1)/2, ch=(h+1)/2;
-            for(int y=0;y<ch;++y){
-                memcpy(dst[1]+y*lines[1],use->data[1]+y*use->linesize[1],(size_t)cw);
-                memcpy(dst[2]+y*lines[2],use->data[2]+y*use->linesize[2],(size_t)cw);
-            }
-        } else {
-            sws=sws_getCachedContext(sws,w,h,(AVPixelFormat)use->format,
-                                     w,h,AV_PIX_FMT_YUV420P,SWS_FAST_BILINEAR,nullptr,nullptr,nullptr);
-            if(!sws) return;
-            if(sws_scale(sws,use->data,use->linesize,0,h,dst,lines)<=0) return;
-        }
+        sws=sws_getCachedContext(sws,w,h,(AVPixelFormat)use->format,
+                                 w,h,AV_PIX_FMT_BGRA,SWS_FAST_BILINEAR,nullptr,nullptr,nullptr);
+        if(!sws) return;
+        if(sws_scale(sws,use->data,use->linesize,0,h,dst,lines)<=0) return;
 
         {
             std::lock_guard<std::mutex> lock(pending_frame_mtx);
             pending_frame.w=w;
             pending_frame.h=h;
-            pending_frame.yuv420=std::move(buf);
+            pending_frame.pitch=pitch;
+            pending_frame.bgra=std::move(buf);
             pending_frame.ready=true;
         }
     }
@@ -341,30 +333,42 @@ static void RenderPendingFrame(){
         if(!pending_frame.ready) return;
         frame.w=pending_frame.w;
         frame.h=pending_frame.h;
-        frame.yuv420=std::move(pending_frame.yuv420);
+        frame.pitch=pending_frame.pitch;
+        frame.bgra=std::move(pending_frame.bgra);
         pending_frame.ready=false;
     }
 
-    if(frame.w<=0 || frame.h<=0 || frame.yuv420.empty() || !renderer_) return;
+    if(frame.w<=0 || frame.h<=0 || frame.pitch<=0 || frame.bgra.empty() || !renderer_) return;
 
     if(!texture_ || frame.w!=stream_w || frame.h!=stream_h){
         stream_w=frame.w;
         stream_h=frame.h;
         if(texture_) SDL_DestroyTexture(texture_);
-        texture_=SDL_CreateTexture(renderer_,SDL_PIXELFORMAT_IYUV,SDL_TEXTUREACCESS_STREAMING,stream_w,stream_h);
-        Log("video mode: "+std::to_string(stream_w)+"x"+std::to_string(stream_h));
+        texture_=SDL_CreateTexture(renderer_,SDL_PIXELFORMAT_ARGB8888,
+                                   SDL_TEXTUREACCESS_STREAMING,stream_w,stream_h);
+        if(!texture_){
+            Log(std::string("SDL_CreateTexture failed: ")+SDL_GetError());
+            return;
+        }
+        Log("video mode: "+std::to_string(stream_w)+"x"+std::to_string(stream_h)+" BGRA");
     }
-    if(!texture_) return;
 
-    uint8_t* src[4]{};
-    int lines[4]{};
-    if(av_image_fill_arrays(src,lines,frame.yuv420.data(),AV_PIX_FMT_YUV420P,frame.w,frame.h,1)<0) return;
+    if(SDL_UpdateTexture(texture_,nullptr,frame.bgra.data(),frame.pitch)!=0){
+        Log(std::string("SDL_UpdateTexture failed: ")+SDL_GetError());
+        return;
+    }
 
-    SDL_UpdateYUVTexture(texture_,nullptr,src[0],lines[0],src[1],lines[1],src[2],lines[2]);
     {
         std::lock_guard<std::mutex> lock(render_mtx);
-        SDL_RenderClear(renderer_);
-        SDL_RenderCopy(renderer_,texture_,nullptr,nullptr);
+        SDL_SetRenderDrawColor(renderer_,0,0,0,255);
+        if(SDL_RenderClear(renderer_)!=0){
+            Log(std::string("SDL_RenderClear failed: ")+SDL_GetError());
+            return;
+        }
+        if(SDL_RenderCopy(renderer_,texture_,nullptr,nullptr)!=0){
+            Log(std::string("SDL_RenderCopy failed: ")+SDL_GetError());
+            return;
+        }
         SDL_RenderPresent(renderer_);
     }
     ++frames;
