@@ -1,4 +1,5 @@
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
@@ -115,7 +116,10 @@ struct Decoder {
         parser=av_parser_init(AV_CODEC_ID_H264);
         frame=av_frame_alloc(); sw=av_frame_alloc(); pkt=av_packet_alloc();
         if(!ctx||!parser||!frame||!sw||!pkt) return false;
-        for(int i=0;;++i){
+        const char* disable_vaapi=getenv("PADDISPLAY_DISABLE_VAAPI");
+        bool allow_hw=!(disable_vaapi && std::string(disable_vaapi)!="0");
+        if(!allow_hw) Log("decoder: VA-API disabled by PADDISPLAY_DISABLE_VAAPI");
+        for(int i=0;allow_hw;++i){
             const AVCodecHWConfig* c=avcodec_get_hw_config(codec,i);
             if(!c) break;
             if((c->methods&AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
@@ -166,7 +170,8 @@ struct Decoder {
             sws_scale(sws,use->data,use->linesize,0,use->height,dst,lines);
             SDL_UpdateYUVTexture(texture_,nullptr,dst[0],lines[0],dst[1],lines[1],dst[2],lines[2]);
         }
-        SDL_RenderClear(renderer_); SDL_RenderCopy(renderer_,texture_,nullptr,nullptr); SDL_RenderPresent(renderer_);
+        { std::lock_guard<std::mutex> lock(render_mtx);
+          SDL_RenderClear(renderer_); SDL_RenderCopy(renderer_,texture_,nullptr,nullptr); SDL_RenderPresent(renderer_); }
         ++frames;
     }
     void Feed(const uint8_t* data,size_t bytes){
@@ -247,6 +252,7 @@ static void NetworkThread(){
         int one=1; setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof(one));
         {std::lock_guard<std::mutex> lock(send_mtx);client_fd=fd;}
         connected=true;
+        SDL_SetWindowTitle(window_,"PadDisplay - Connected");
         const std::string hello="{\"protocol\":1,\"client\":\"linux\",\"session_mode\":\"thin_client\","
             "\"video\":\"h264\",\"audio_pcm_v2\":true,\"audio_port\":4824,"
             "\"mouse_v1\":true,\"keyboard_v1\":true,\"vaapi\":true}";
@@ -267,6 +273,8 @@ static void NetworkThread(){
             }
         }
         connected=false;
+        SDL_SetWindowTitle(window_,"PadDisplay - Waiting for host...");
+        DrawStatus("PadDisplay - Waiting for host...");
         {std::lock_guard<std::mutex> lock(send_mtx);if(client_fd==fd)client_fd=-1;}
         close(fd); Log("host disconnected");
     }
@@ -307,16 +315,53 @@ static void SendKey(const SDL_KeyboardEvent& e,bool up){
     uint8_t p[6]={uint8_t(up?1:0),uint8_t(vk>>8),uint8_t(vk),uint8_t(sc>>8),uint8_t(sc),0};
     SendPacket(KEYBOARD_V1,p,sizeof(p));
 }
+
+static TTF_Font* status_font=nullptr;
+static std::mutex render_mtx;
+
+static void DrawStatus(const char* message){
+    if(!renderer_) return;
+    std::lock_guard<std::mutex> lock(render_mtx);
+    SDL_SetRenderDrawColor(renderer_,18,18,22,255);
+    SDL_RenderClear(renderer_);
+
+    int w=0,h=0;
+    SDL_GetRendererOutputSize(renderer_,&w,&h);
+    SDL_Rect panel{std::max(20,w/2-330),std::max(20,h/2-90),std::min(660,w-40),180};
+    SDL_SetRenderDrawColor(renderer_,35,35,42,255);
+    SDL_RenderFillRect(renderer_,&panel);
+
+    if(status_font){
+        SDL_Color fg{235,235,240,255};
+        SDL_Surface* s=TTF_RenderUTF8_Blended(status_font,message,fg);
+        if(s){
+            SDL_Texture* t=SDL_CreateTextureFromSurface(renderer_,s);
+            if(t){
+                SDL_Rect dst{w/2-s->w/2,h/2-s->h/2,s->w,s->h};
+                SDL_RenderCopy(renderer_,t,nullptr,&dst);
+                SDL_DestroyTexture(t);
+            }
+            SDL_FreeSurface(s);
+        }
+    }
+    SDL_RenderPresent(renderer_);
+}
+
 int main(){
     const char* home=getenv("HOME");
     std::string state=home?std::string(home)+"/.local/state/paddisplay":"/tmp/paddisplay";
     if(home){mkdir((std::string(home)+"/.local").c_str(),0755);mkdir((std::string(home)+"/.local/state").c_str(),0755);}
     mkdir(state.c_str(),0755); log_file.open(state+"/receiver.log",std::ios::app);
     if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_AUDIO|SDL_INIT_EVENTS)!=0){fprintf(stderr,"SDL init failed: %s\n",SDL_GetError());return 1;}
+    if(TTF_Init()!=0) Log(std::string("SDL_ttf init failed: ")+TTF_GetError());
     window_=SDL_CreateWindow("PadDisplay Linux Client",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,1366,768,
                              SDL_WINDOW_SHOWN|SDL_WINDOW_RESIZABLE|SDL_WINDOW_FULLSCREEN_DESKTOP);
     renderer_=SDL_CreateRenderer(window_,-1,SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
     if(!window_||!renderer_){fprintf(stderr,"SDL video failed: %s\n",SDL_GetError());return 1;}
+    status_font=TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",36);
+    if(!status_font) Log(std::string("status font unavailable: ")+TTF_GetError());
+    SDL_SetWindowTitle(window_,"PadDisplay - Waiting for host...");
+    DrawStatus("PadDisplay - Waiting for host...");
     SDL_AudioSpec want{},got{}; want.freq=48000; want.format=AUDIO_S16LSB; want.channels=2; want.samples=1024; want.callback=AudioCallback;
     audio_dev=SDL_OpenAudioDevice(nullptr,0,&want,&got,0);
     if(audio_dev) SDL_PauseAudioDevice(audio_dev,0); else Log(std::string("audio open failed: ")+SDL_GetError());
@@ -357,8 +402,10 @@ int main(){
     if(audio_dev) SDL_CloseAudioDevice(audio_dev);
     if(texture_) SDL_DestroyTexture(texture_);
     if(renderer_) SDL_DestroyRenderer(renderer_);
+    if(status_font) TTF_CloseFont(status_font);
     if(window_) SDL_DestroyWindow(window_);
     if(hw_device) av_buffer_unref(&hw_device);
+    TTF_Quit();
     SDL_Quit();
     return 0;
 }
