@@ -1,5 +1,8 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_syswm.h>
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
 #define GL_GLEXT_PROTOTYPES
 #include <SDL2/SDL_opengl.h>
 extern "C" {
@@ -555,6 +558,40 @@ static void NetworkThread(){
     }
     close(listener);
 }
+static void SetX11FullscreenHint(bool enable){
+    if(!window_) return;
+
+    SDL_SysWMinfo info{};
+    SDL_VERSION(&info.version);
+    if(!SDL_GetWindowWMInfo(window_,&info)) {
+        Log(std::string("fullscreen: SDL_GetWindowWMInfo failed: ")+SDL_GetError());
+        return;
+    }
+    if(info.subsystem!=SDL_SYSWM_X11) return;
+
+    Display* display=info.info.x11.display;
+    Window xwindow=info.info.x11.window;
+    Window root=DefaultRootWindow(display);
+
+    Atom wm_state=XInternAtom(display,"_NET_WM_STATE",False);
+    Atom fullscreen=XInternAtom(display,"_NET_WM_STATE_FULLSCREEN",False);
+
+    XEvent event{};
+    event.xclient.type=ClientMessage;
+    event.xclient.window=xwindow;
+    event.xclient.message_type=wm_state;
+    event.xclient.format=32;
+    event.xclient.data.l[0]=enable ? 1 : 0; // _NET_WM_STATE_ADD / REMOVE
+    event.xclient.data.l[1]=fullscreen;
+    event.xclient.data.l[2]=0;
+    event.xclient.data.l[3]=1; // source indication: normal application
+    event.xclient.data.l[4]=0;
+
+    XSendEvent(display,root,False,
+               SubstructureRedirectMask|SubstructureNotifyMask,&event);
+    XFlush(display);
+}
+
 static void SetBorderlessFullscreen(bool enable){
     if(!window_) return;
 
@@ -571,12 +608,14 @@ static void SetBorderlessFullscreen(bool enable){
 
         SDL_SetWindowBordered(window_,SDL_FALSE);
         SDL_SetWindowAlwaysOnTop(window_,SDL_TRUE);
+        SetX11FullscreenHint(true);
         SDL_SetWindowPosition(window_,bounds.x,bounds.y);
         SDL_SetWindowSize(window_,bounds.w,bounds.h);
         SDL_RaiseWindow(window_);
         fullscreen_=true;
         Log("fullscreen: borderless "+std::to_string(bounds.w)+"x"+std::to_string(bounds.h));
     } else {
+        SetX11FullscreenHint(false);
         SDL_SetWindowAlwaysOnTop(window_,SDL_FALSE);
         SDL_SetWindowBordered(window_,SDL_TRUE);
         SDL_SetWindowSize(window_,windowed_w,windowed_h);
