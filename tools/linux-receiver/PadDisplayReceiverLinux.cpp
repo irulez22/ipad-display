@@ -1,5 +1,6 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_opengl.h>
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
@@ -46,8 +47,9 @@ static std::atomic<uint64_t> frame_fingerprint{0};
 static std::atomic<uint64_t> audio_packets{0}, audio_underruns{0};
 
 static SDL_Window* window_=nullptr;
-static SDL_Renderer* renderer_=nullptr;
-static SDL_Texture* texture_=nullptr;
+static SDL_GLContext gl_context=nullptr;
+static GLuint gl_texture=0;
+static int gl_tex_w=0, gl_tex_h=0;
 static SDL_AudioDeviceID audio_dev=0;
 static bool fullscreen_=true;
 static int stream_w=1366, stream_h=768;
@@ -347,67 +349,63 @@ static void RenderPendingFrame(){
         pending_frame.ready=false;
     }
 
-    if(frame.w<=0 || frame.h<=0 || frame.pitch<=0 || frame.bgra.empty() || !window_) return;
+    if(frame.w<=0 || frame.h<=0 || frame.pitch<=0 || frame.bgra.empty() || !window_ || !gl_context) return;
 
-    SDL_Surface* dst=SDL_GetWindowSurface(window_);
-    if(!dst){
-        Log(std::string("SDL_GetWindowSurface failed: ")+SDL_GetError());
-        return;
-    }
+    if(!gl_texture) glGenTextures(1,&gl_texture);
+    glBindTexture(GL_TEXTURE_2D,gl_texture);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1);
 
-    SDL_Surface* src=SDL_CreateRGBSurfaceWithFormatFrom(
-        frame.bgra.data(),frame.w,frame.h,32,frame.pitch,SDL_PIXELFORMAT_ARGB8888);
-    if(!src){
-        Log(std::string("SDL_CreateRGBSurfaceWithFormatFrom failed: ")+SDL_GetError());
-        return;
-    }
-
-    SDL_Rect out{0,0,dst->w,dst->h};
-    if(SDL_BlitScaled(src,nullptr,dst,&out)!=0){
-        Log(std::string("SDL_BlitScaled failed: ")+SDL_GetError());
-        SDL_FreeSurface(src);
-        return;
-    }
-    SDL_FreeSurface(src);
-
-    if(SDL_UpdateWindowSurface(window_)!=0){
-        Log(std::string("SDL_UpdateWindowSurface failed: ")+SDL_GetError());
-        return;
-    }
-
-    if(frame.w!=stream_w || frame.h!=stream_h){
+    if(frame.w!=gl_tex_w || frame.h!=gl_tex_h){
+        gl_tex_w=frame.w;
+        gl_tex_h=frame.h;
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,frame.w,frame.h,0,
+                     GL_BGRA,GL_UNSIGNED_BYTE,frame.bgra.data());
         stream_w=frame.w;
         stream_h=frame.h;
-        Log("video mode: "+std::to_string(stream_w)+"x"+std::to_string(stream_h)+" window-surface");
+        Log("video mode: "+std::to_string(stream_w)+"x"+std::to_string(stream_h)+" OpenGL");
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D,0,0,0,frame.w,frame.h,
+                        GL_BGRA,GL_UNSIGNED_BYTE,frame.bgra.data());
     }
+
+    int dw=1,dh=1;
+    SDL_GL_GetDrawableSize(window_,&dw,&dh);
+    glViewport(0,0,dw,dh);
+    glClearColor(0.f,0.f,0.f,1.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    const float src_aspect=(float)frame.w/(float)frame.h;
+    const float dst_aspect=(float)dw/(float)dh;
+    float sx=1.f, sy=1.f;
+    if(dst_aspect>src_aspect) sx=src_aspect/dst_aspect;
+    else sy=dst_aspect/src_aspect;
+
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D,gl_texture);
+    glBegin(GL_QUADS);
+      glTexCoord2f(0.f,0.f); glVertex2f(-sx, sy);
+      glTexCoord2f(1.f,0.f); glVertex2f( sx, sy);
+      glTexCoord2f(1.f,1.f); glVertex2f( sx,-sy);
+      glTexCoord2f(0.f,1.f); glVertex2f(-sx,-sy);
+    glEnd();
+
+    SDL_GL_SwapWindow(window_);
     ++frames;
 }
 
 static void DrawStatus(const char* message){
-    if(!window_) return;
-    SDL_Surface* dst=SDL_GetWindowSurface(window_);
-    if(!dst) return;
-
-    SDL_FillRect(dst,nullptr,SDL_MapRGB(dst->format,18,18,22));
-
-    SDL_Rect panel{
-        std::max(20,dst->w/2-330),
-        std::max(20,dst->h/2-90),
-        std::min(660,dst->w-40),
-        180
-    };
-    SDL_FillRect(dst,&panel,SDL_MapRGB(dst->format,35,35,42));
-
-    if(status_font){
-        SDL_Color fg{235,235,240,255};
-        SDL_Surface* text=TTF_RenderUTF8_Blended(status_font,message,fg);
-        if(text){
-            SDL_Rect pos{dst->w/2-text->w/2,dst->h/2-text->h/2,text->w,text->h};
-            SDL_BlitSurface(text,nullptr,dst,&pos);
-            SDL_FreeSurface(text);
-        }
-    }
-    SDL_UpdateWindowSurface(window_);
+    (void)message;
+    if(!window_ || !gl_context) return;
+    int dw=1,dh=1;
+    SDL_GL_GetDrawableSize(window_,&dw,&dh);
+    glViewport(0,0,dw,dh);
+    glClearColor(0.07f,0.07f,0.09f,1.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    SDL_GL_SwapWindow(window_);
 }
 
 int main(){
@@ -417,13 +415,24 @@ int main(){
     mkdir(state.c_str(),0755); log_file.open(state+"/receiver.log",std::ios::app);
     if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_AUDIO|SDL_INIT_EVENTS)!=0){fprintf(stderr,"SDL init failed: %s\n",SDL_GetError());return 1;}
     if(TTF_Init()!=0) Log(std::string("SDL_ttf init failed: ")+TTF_GetError());
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,1);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
     window_=SDL_CreateWindow("PadDisplay Linux Client",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,1366,768,
-                             SDL_WINDOW_SHOWN|SDL_WINDOW_RESIZABLE|SDL_WINDOW_FULLSCREEN_DESKTOP);
+                             SDL_WINDOW_SHOWN|SDL_WINDOW_RESIZABLE|SDL_WINDOW_FULLSCREEN_DESKTOP|SDL_WINDOW_OPENGL);
     if(!window_){fprintf(stderr,"SDL window failed: %s\n",SDL_GetError());return 1;}
-    SDL_Surface* initial_surface=SDL_GetWindowSurface(window_);
-    if(!initial_surface){fprintf(stderr,"SDL window surface failed: %s\n",SDL_GetError());return 1;}
-    Log(std::string("SDL presentation: window surface ")+
-        std::to_string(initial_surface->w)+"x"+std::to_string(initial_surface->h));
+    gl_context=SDL_GL_CreateContext(window_);
+    if(!gl_context){fprintf(stderr,"OpenGL context failed: %s\n",SDL_GetError());return 1;}
+    if(SDL_GL_MakeCurrent(window_,gl_context)!=0){fprintf(stderr,"OpenGL make-current failed: %s\n",SDL_GetError());return 1;}
+    SDL_GL_SetSwapInterval(0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    Log(std::string("SDL presentation: OpenGL ")+
+        reinterpret_cast<const char*>(glGetString(GL_VERSION)));
     status_font=TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",36);
     if(!status_font) Log(std::string("status font unavailable: ")+TTF_GetError());
     SDL_SetWindowTitle(window_,"PadDisplay - Waiting for host...");
@@ -481,7 +490,8 @@ int main(){
     video_cv.notify_all();
     net.join(); dec.join(); aud.join();
     if(audio_dev) SDL_CloseAudioDevice(audio_dev);
-    if(texture_) SDL_DestroyTexture(texture_);
+    if(gl_texture) glDeleteTextures(1,&gl_texture);
+    if(gl_context){ SDL_GL_DeleteContext(gl_context); gl_context=nullptr; }
     if(status_font) TTF_CloseFont(status_font);
     if(window_) SDL_DestroyWindow(window_);
     if(hw_device) av_buffer_unref(&hw_device);
