@@ -680,7 +680,7 @@ def input_loop(sock, monitor_rect, stats=None):
         print("Input injection error: %s" % exc)
 
 
-def audio_loop(host, port, helper_path, stats=None):
+def audio_loop(host, port, helper_path, ffmpeg_path, stats=None):
     print("Audio: connecting dedicated stream to %s:%d..." % (host, port))
     audio_sock = None
     deadline = time.monotonic() + 5.0
@@ -745,26 +745,78 @@ def audio_loop(host, port, helper_path, stats=None):
         print("Audio: invalid WASAPI helper format handshake: %s" % exc, flush=True)
         return
 
+    input_formats = {"s16": "s16le", "s32": "s32le", "f32": "f32le"}
+    ffmpeg_input_format = input_formats[format_name]
+
+    # Let FFmpeg/libswresample own all sample-format/channel/rate conversion.
+    # The network wire format stays fixed at 48 kHz stereo signed 16-bit PCM.
+    convert_cmd = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-f", ffmpeg_input_format,
+        "-ar", str(sample_rate),
+        "-ac", str(channels),
+        "-i", "pipe:0",
+        "-vn",
+        "-af", "aresample=48000:async=1:first_pts=0",
+        "-ar", "48000",
+        "-ac", "2",
+        "-f", "s16le",
+        "pipe:1",
+    ]
+    try:
+        converter = subprocess.Popen(
+            convert_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            bufsize=0,
+        )
+    except Exception as exc:
+        print("Audio: could not start FFmpeg audio converter: %s" % exc, flush=True)
+        return
+
+    def pump_native_audio():
+        try:
+            while True:
+                data = proc.stdout.read(max(block_align, 16384))
+                if not data:
+                    break
+                converter.stdin.write(data)
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            try:
+                converter.stdin.close()
+            except Exception:
+                pass
+
+    pump_thread = threading.Thread(target=pump_native_audio, daemon=True)
+    pump_thread.start()
+
+    # Tell Linux only about the canonical converted wire format.
     send_packet(
         audio_sock,
         AUDIO_FORMAT,
-        struct.pack(">IBBH", sample_rate, channels, format_code, block_align),
+        struct.pack(">IBBH", 48000, 2, 1, 4),
     )
-    print("Audio: native WASAPI %d Hz, %d ch, %s -> Linux SDL conversion." %
-          (sample_rate, channels, format_name), flush=True)
+    print(
+        "Audio: WASAPI %d Hz, %d ch, %s -> FFmpeg -> 48000 Hz stereo s16le."
+        % (sample_rate, channels, format_name),
+        flush=True,
+    )
 
-    chunk = max(block_align, int(sample_rate * block_align / 50))
-    chunk -= chunk % block_align
+    chunk = 3840  # 20 ms of 48 kHz stereo s16le
     pending = bytearray()
     sequence = 0
     try:
         while True:
-            data = proc.stdout.read(chunk)
+            data = converter.stdout.read(chunk)
             if not data:
                 break
 
             pending.extend(data)
-
             while len(pending) >= chunk:
                 pcm = bytes(pending[:chunk])
                 timestamp_us = int(time.monotonic() * 1000000.0)
@@ -775,7 +827,7 @@ def audio_loop(host, port, helper_path, stats=None):
                     stats.add_audio(chunk)
                 del pending[:chunk]
 
-        usable = len(pending) - (len(pending) % block_align)
+        usable = len(pending) - (len(pending) % 4)
         if usable:
             pcm = bytes(pending[:usable])
             timestamp_us = int(time.monotonic() * 1000000.0)
@@ -783,6 +835,10 @@ def audio_loop(host, port, helper_path, stats=None):
             send_packet(audio_sock, AUDIO_PCM_V2, payload)
             if stats is not None:
                 stats.add_audio(usable)
+
+        converter_rc = converter.wait(timeout=2)
+        if converter_rc != 0:
+            print("Audio: FFmpeg converter exited with code %d." % converter_rc, flush=True)
     except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
         pass
     finally:
@@ -1012,7 +1068,7 @@ def main():
         if args.audio_loopback:
             audio_thread = threading.Thread(
                 target=audio_loop,
-                args=(args.host, args.audio_port, args.audio_loopback, stats),
+                args=(args.host, args.audio_port, args.audio_loopback, args.ffmpeg, stats),
                 daemon=True,
             )
             audio_thread.start()
