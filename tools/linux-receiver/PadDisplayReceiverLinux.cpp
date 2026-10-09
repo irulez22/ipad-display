@@ -44,7 +44,7 @@ static constexpr size_t VIDEO_Q_MAX=8;
 static constexpr size_t AUDIO_MAX=48000*4*120/1000;
 static constexpr size_t AUDIO_START_BYTES=48000*4*40/1000;
 static bool audio_playing=false;
-static std::atomic<uint64_t> video_packets{0}, video_bytes{0}, frames{0};
+static std::atomic<uint64_t> video_packets{0}, video_bytes{0}, decoded_frames{0}, frames{0};
 static std::atomic<uint64_t> frame_fingerprint{0};
 static std::atomic<uint64_t> frame_change_ppm{0};
 static std::atomic<uint64_t> audio_packets{0}, audio_underruns{0};
@@ -165,6 +165,7 @@ struct Decoder {
         avcodec_free_context(&ctx);
     }
     void Present(AVFrame* src){
+        ++decoded_frames;
         AVFrame* use=src;
         if(src->format==hw_fmt){
             av_frame_unref(sw);
@@ -529,6 +530,7 @@ int main(){
             Log("health connected="+std::to_string(connected.load())+
                 " video_packets="+std::to_string(video_packets.load())+
                 " video_bytes="+std::to_string(video_bytes.load())+
+                " decoded_frames="+std::to_string(decoded_frames.load())+
                 " frames="+std::to_string(frames.load())+
                 " frame_hash="+std::to_string(frame_fingerprint.load())+
                 " frame_change_ppm="+std::to_string(frame_change_ppm.load())+
