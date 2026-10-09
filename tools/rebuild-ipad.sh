@@ -45,6 +45,16 @@ if [ "${PADDISPLAY_NO_PUSH:-0}" != "1" ]; then
   fi
 
   branch="$(git rev-parse --abbrev-ref HEAD)"
+
+  echo "==> Rebasing build commit onto latest origin/$branch..."
+  git fetch origin "$branch"
+  if ! git rebase "origin/$branch"; then
+    echo "ERROR: Auto-sync rebase conflicted; aborting rebase and leaving the build commit intact." >&2
+    git rebase --abort >/dev/null 2>&1 || true
+    echo "       Resolve manually with: git pull --rebase origin $branch" >&2
+    exit 1
+  fi
+
   git push origin "$branch"
   echo "==> GitHub push complete: origin/$branch"
 else
