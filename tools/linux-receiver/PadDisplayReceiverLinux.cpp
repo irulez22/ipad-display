@@ -71,7 +71,7 @@ static std::mutex pending_frame_mtx;
 static PendingVideoFrame pending_frame;
 
 static void DrawStatus(const char* message);
-static void RenderPendingFrame();
+static bool RenderPendingFrame();
 
 static void Log(const std::string& s) {
     std::lock_guard<std::mutex> lock(log_mtx);
@@ -386,11 +386,11 @@ static void SendKey(const SDL_KeyboardEvent& e,bool up){
     SendPacket(KEYBOARD_V1,p,sizeof(p));
 }
 
-static void RenderPendingFrame(){
+static bool RenderPendingFrame(){
     PendingVideoFrame frame;
     {
         std::lock_guard<std::mutex> lock(pending_frame_mtx);
-        if(!pending_frame.ready) return;
+        if(!pending_frame.ready) return false;
         frame.w=pending_frame.w;
         frame.h=pending_frame.h;
         frame.pitch=pending_frame.pitch;
@@ -398,7 +398,7 @@ static void RenderPendingFrame(){
         pending_frame.ready=false;
     }
 
-    if(frame.w<=0 || frame.h<=0 || frame.pitch<=0 || frame.bgra.empty() || !window_ || !gl_context) return;
+    if(frame.w<=0 || frame.h<=0 || frame.pitch<=0 || frame.bgra.empty() || !window_ || !gl_context) return false;
 
     if(!gl_texture) glGenTextures(1,&gl_texture);
     glBindTexture(GL_TEXTURE_2D,gl_texture);
@@ -444,6 +444,7 @@ static void RenderPendingFrame(){
 
     SDL_GL_SwapWindow(window_);
     ++frames;
+    return true;
 }
 
 static void DrawStatus(const char* message){
@@ -497,7 +498,7 @@ int main(){
     bool last_connected=false;
     while(running){
         SDL_Event e{};
-        if(SDL_WaitEventTimeout(&e,5)){
+        while(SDL_PollEvent(&e)){
             if(e.type==SDL_QUIT) running=false;
             else if(e.type==SDL_KEYDOWN||e.type==SDL_KEYUP){
                 bool up=e.type==SDL_KEYUP; SDL_Keymod mods=SDL_GetModState();
@@ -524,7 +525,9 @@ int main(){
             }
         }
 
-        if(now_connected) RenderPendingFrame();
+        bool presented=false;
+        if(now_connected) presented=RenderPendingFrame();
+        if(!presented) SDL_Delay(1);
 
         auto now=std::chrono::steady_clock::now();
         if(now-last>=std::chrono::seconds(5)){
