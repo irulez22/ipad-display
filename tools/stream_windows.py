@@ -49,6 +49,19 @@ PD_TOUCH_MOVE = 1
 PD_TOUCH_UP = 2
 PD_TOUCH_CANCEL = 3
 
+# The launcher passes physical monitor coordinates. Keep this Python process in
+# the same coordinate space before any GetSystemMetrics/SendInput calls.
+if sys.platform == "win32":
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
 
 
 class StreamStats:
