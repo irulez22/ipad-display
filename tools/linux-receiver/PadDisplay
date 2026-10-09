@@ -1,0 +1,20 @@
+#!/bin/sh
+REPO="$HOME/ipad-display"
+HERE="$REPO/tools/linux-receiver"
+STATE="$HOME/.local/state/paddisplay"
+
+mkdir -p "$STATE"
+exec >>"$STATE/desktop-launch.log" 2>&1
+
+echo "$(date '+%F %T') PadDisplay desktop launcher starting"
+
+if [ ! -d "$HERE" ]; then
+  echo "Repository not found: $HERE"
+  command -v notify-send >/dev/null 2>&1 && notify-send "PadDisplay" "Repository not found at $REPO"
+  exit 1
+fi
+
+cd "$HERE" || exit 1
+pkill -f paddisplay-receiver >/dev/null 2>&1 || true
+export PADDISPLAY_DISABLE_VAAPI=1
+exec /bin/sh "$HERE/run.sh"
