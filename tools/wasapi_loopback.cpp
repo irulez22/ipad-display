@@ -137,31 +137,41 @@ int wmain()
     hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void **)&audio);
     if (FAILED(hr)) goto fail;
 
+    // Log the endpoint mix format for diagnostics, but do not manually parse or
+    // resample it. Ask the Windows shared audio engine to deliver exactly the
+    // wire format PadDisplay uses: 48 kHz stereo signed 16-bit PCM.
     hr = audio->GetMixFormat(&mix);
-    if (FAILED(hr) || !mix) goto fail;
-
-    AudioFormatInfo inputFmt;
-    if (!parse_format(mix, inputFmt)) {
-        fwprintf(stderr, L"Unsupported Windows mix format: tag=%u channels=%u rate=%lu bits=%u align=%u\n",
-                 mix->wFormatTag, mix->nChannels, mix->nSamplesPerSec,
-                 mix->wBitsPerSample, mix->nBlockAlign);
-        hr = E_FAIL;
-        goto fail;
+    if (SUCCEEDED(hr) && mix) {
+        fwprintf(stderr, L"WASAPI engine mix: %lu Hz, %u ch, %u-bit tag=%u; requesting 48000 Hz stereo s16le\n",
+                 mix->nSamplesPerSec, mix->nChannels, mix->wBitsPerSample, mix->wFormatTag);
     }
 
-    fwprintf(stderr, L"WASAPI mix: %lu Hz, %u ch, %u-bit%s; output 48000 Hz stereo s16le\n",
-             inputFmt.sampleRate, inputFmt.channels, inputFmt.containerBits,
-             inputFmt.isFloat ? L" float" : L" PCM");
+    WAVEFORMATEX target{};
+    target.wFormatTag = WAVE_FORMAT_PCM;
+    target.nChannels = 2;
+    target.nSamplesPerSec = 48000;
+    target.wBitsPerSample = 16;
+    target.nBlockAlign = (WORD)(target.nChannels * target.wBitsPerSample / 8);
+    target.nAvgBytesPerSec = target.nSamplesPerSec * target.nBlockAlign;
+    target.cbSize = 0;
+
+    const DWORD flags =
+        AUDCLNT_STREAMFLAGS_LOOPBACK |
+        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+        AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
 
     hr = audio->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_LOOPBACK,
+        flags,
         1000000,
         0,
-        mix,
+        &target,
         nullptr
     );
-    if (FAILED(hr)) goto fail;
+    if (FAILED(hr)) {
+        fwprintf(stderr, L"WASAPI Initialize failed for 48k stereo s16le: 0x%08lx\n", (unsigned long)hr);
+        goto fail;
+    }
 
     hr = audio->GetService(__uuidof(IAudioCaptureClient), (void **)&capture);
     if (FAILED(hr)) goto fail;
@@ -170,12 +180,7 @@ int wmain()
     if (FAILED(hr)) goto fail;
 
     setvbuf(stdout, nullptr, _IONBF, 0);
-
-    uint64_t resampleAccumulator = 0;
-    const uint64_t outputRate = 48000;
-    bool havePreviousSample = false;
-    float previousLeft = 0.0f;
-    float previousRight = 0.0f;
+    fwprintf(stderr, L"WASAPI loopback active: Windows engine conversion -> 48000 Hz stereo s16le\n");
 
     for (;;) {
         UINT32 packetFrames = 0;
@@ -183,7 +188,7 @@ int wmain()
         if (FAILED(hr)) break;
 
         if (!packetFrames) {
-            Sleep(3);
+            Sleep(2);
             continue;
         }
 
@@ -194,53 +199,15 @@ int wmain()
             hr = capture->GetBuffer(&data, &frames, &captureFlags, nullptr, nullptr);
             if (FAILED(hr)) goto done;
 
-            std::vector<int16_t> output;
-            const size_t estimatedFrames =
-                (size_t)(((uint64_t)frames * outputRate + inputFmt.sampleRate - 1) / inputFmt.sampleRate) + 2;
-            output.reserve(estimatedFrames * 2);
-
-            const bool silent = (captureFlags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-            const size_t bytesPerContainerSample = inputFmt.containerBits / 8;
-
-            for (UINT32 i = 0; i < frames; ++i) {
-                float left = 0.0f;
-                float right = 0.0f;
-
-                if (!silent) {
-                    const BYTE *frame = data + (size_t)i * inputFmt.blockAlign;
-                    left = read_sample(frame, inputFmt);
-                    if (inputFmt.channels >= 2) {
-                        right = read_sample(frame + bytesPerContainerSample, inputFmt);
-                    } else {
-                        right = left;
-                    }
+            const size_t bytes = (size_t)frames * target.nBlockAlign;
+            if (captureFlags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                std::vector<uint8_t> silence(bytes, 0);
+                if (bytes && fwrite(silence.data(), 1, bytes, stdout) != bytes) {
+                    capture->ReleaseBuffer(frames);
+                    goto done;
                 }
-
-                if (!havePreviousSample) {
-                    previousLeft = left;
-                    previousRight = right;
-                    havePreviousSample = true;
-                    continue;
-                }
-
-                resampleAccumulator += outputRate;
-                while (resampleAccumulator >= inputFmt.sampleRate) {
-                    const uint64_t overshoot = resampleAccumulator - inputFmt.sampleRate;
-                    const float fraction = 1.0f - (float)overshoot / (float)outputRate;
-                    const float outLeft = previousLeft + (left - previousLeft) * fraction;
-                    const float outRight = previousRight + (right - previousRight) * fraction;
-                    output.push_back(to_s16(outLeft));
-                    output.push_back(to_s16(outRight));
-                    resampleAccumulator -= inputFmt.sampleRate;
-                }
-
-                previousLeft = left;
-                previousRight = right;
-            }
-
-            if (!output.empty()) {
-                const size_t bytes = output.size() * sizeof(int16_t);
-                if (fwrite(output.data(), 1, bytes, stdout) != bytes) {
+            } else if (bytes) {
+                if (fwrite(data, 1, bytes, stdout) != bytes) {
                     capture->ReleaseBuffer(frames);
                     goto done;
                 }
