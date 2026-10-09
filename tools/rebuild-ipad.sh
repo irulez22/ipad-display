@@ -6,15 +6,10 @@ cd ~/ipad-display
 echo "==> Restoring packaging control file..."
 git restore control 2>/dev/null || git checkout -- control
 
-echo "==> Syncing latest changes..."
-branch="$(git rev-parse --abbrev-ref HEAD)"
-git fetch origin "$branch"
-if ! git rebase --autostash "origin/$branch"; then
-  echo "ERROR: Startup rebase conflicted; aborting and preserving local commits." >&2
-  git rebase --abort >/dev/null 2>&1 || true
-  echo "       Resolve manually with: git pull --rebase --autostash origin $branch" >&2
-  exit 1
-fi
+echo "==> Resetting to latest GitHub main..."
+git fetch origin main
+git reset --hard origin/main
+git clean -fd
 
 echo "==> Normalizing control line endings..."
 sed -i 's/\r$//' control
@@ -40,34 +35,8 @@ echo
 echo "==> Built PadDisplay $version"
 echo "    $deb"
 
-if [ "${PADDISPLAY_NO_PUSH:-0}" != "1" ]; then
-  echo
-  echo "==> Syncing successful build to GitHub..."
-  git add -A
-
-  if ! git diff --cached --quiet; then
-    git commit -m "Auto-sync successful PadDisplay build $(date '+%Y-%m-%d %H:%M:%S')"
-  else
-    echo "No new repository changes to commit."
-  fi
-
-  branch="$(git rev-parse --abbrev-ref HEAD)"
-
-  echo "==> Rebasing build commit onto latest origin/$branch..."
-  git fetch origin "$branch"
-  if ! git rebase "origin/$branch"; then
-    echo "ERROR: Auto-sync rebase conflicted; aborting rebase and leaving the build commit intact." >&2
-    git rebase --abort >/dev/null 2>&1 || true
-    echo "       Resolve manually with: git pull --rebase origin $branch" >&2
-    exit 1
-  fi
-
-  git push origin "$branch"
-  echo "==> GitHub push complete: origin/$branch"
-else
-  echo
-  echo "==> GitHub auto-push disabled by PADDISPLAY_NO_PUSH=1"
-fi
+echo
+echo "==> GitHub is source of truth; rebuild does not commit or push repository changes."
 
 if [ "${PADDISPLAY_NO_RELEASE:-0}" != "1" ]; then
   echo
