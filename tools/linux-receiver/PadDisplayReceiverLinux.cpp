@@ -420,8 +420,12 @@ int main(){
     if(TTF_Init()!=0) Log(std::string("SDL_ttf init failed: ")+TTF_GetError());
     window_=SDL_CreateWindow("PadDisplay Linux Client",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,1366,768,
                              SDL_WINDOW_SHOWN|SDL_WINDOW_RESIZABLE|SDL_WINDOW_FULLSCREEN_DESKTOP);
-    renderer_=SDL_CreateRenderer(window_,-1,SDL_RENDERER_ACCELERATED|SDL_RENDERER_PRESENTVSYNC);
+    renderer_=SDL_CreateRenderer(window_,-1,SDL_RENDERER_SOFTWARE);
     if(!window_||!renderer_){fprintf(stderr,"SDL video failed: %s\n",SDL_GetError());return 1;}
+    SDL_RendererInfo renderer_info{};
+    if(SDL_GetRendererInfo(renderer_,&renderer_info)==0){
+        Log(std::string("SDL renderer: ")+(renderer_info.name?renderer_info.name:"unknown"));
+    }
     status_font=TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",36);
     if(!status_font) Log(std::string("status font unavailable: ")+TTF_GetError());
     SDL_SetWindowTitle(window_,"PadDisplay - Waiting for host...");
