@@ -54,7 +54,17 @@ static AVBufferRef* hw_device=nullptr;
 static AVPixelFormat hw_fmt=AV_PIX_FMT_NONE;
 static TTF_Font* status_font=nullptr;
 static std::mutex render_mtx;
+
+struct PendingVideoFrame {
+    int w=0, h=0;
+    std::vector<uint8_t> yuv420;
+    bool ready=false;
+};
+static std::mutex pending_frame_mtx;
+static PendingVideoFrame pending_frame;
+
 static void DrawStatus(const char* message);
+static void RenderPendingFrame();
 
 static void Log(const std::string& s) {
     std::lock_guard<std::mutex> lock(log_mtx);
@@ -153,29 +163,37 @@ struct Decoder {
             if(av_hwframe_transfer_data(sw,src,0)<0) return;
             use=sw;
         }
-        if(!texture_ || use->width!=stream_w || use->height!=stream_h){
-            stream_w=use->width; stream_h=use->height;
-            if(texture_) SDL_DestroyTexture(texture_);
-            texture_=SDL_CreateTexture(renderer_,SDL_PIXELFORMAT_IYUV,SDL_TEXTUREACCESS_STREAMING,stream_w,stream_h);
-            Log("video mode: "+std::to_string(stream_w)+"x"+std::to_string(stream_h));
-        }
-        if(!texture_) return;
+
+        const int w=use->width, h=use->height;
+        const int bytes=av_image_get_buffer_size(AV_PIX_FMT_YUV420P,w,h,1);
+        if(bytes<=0) return;
+
+        std::vector<uint8_t> buf((size_t)bytes);
+        uint8_t* dst[4]{};
+        int lines[4]{};
+        if(av_image_fill_arrays(dst,lines,buf.data(),AV_PIX_FMT_YUV420P,w,h,1)<0) return;
+
         if(use->format==AV_PIX_FMT_YUV420P){
-            SDL_UpdateYUVTexture(texture_,nullptr,use->data[0],use->linesize[0],
-                                 use->data[1],use->linesize[1],use->data[2],use->linesize[2]);
+            for(int y=0;y<h;++y) memcpy(dst[0]+y*lines[0],use->data[0]+y*use->linesize[0],(size_t)w);
+            const int cw=(w+1)/2, ch=(h+1)/2;
+            for(int y=0;y<ch;++y){
+                memcpy(dst[1]+y*lines[1],use->data[1]+y*use->linesize[1],(size_t)cw);
+                memcpy(dst[2]+y*lines[2],use->data[2]+y*use->linesize[2],(size_t)cw);
+            }
         } else {
-            sws=sws_getCachedContext(sws,use->width,use->height,(AVPixelFormat)use->format,
-                                     use->width,use->height,AV_PIX_FMT_YUV420P,SWS_FAST_BILINEAR,nullptr,nullptr,nullptr);
+            sws=sws_getCachedContext(sws,w,h,(AVPixelFormat)use->format,
+                                     w,h,AV_PIX_FMT_YUV420P,SWS_FAST_BILINEAR,nullptr,nullptr,nullptr);
             if(!sws) return;
-            std::vector<uint8_t> buf(av_image_get_buffer_size(AV_PIX_FMT_YUV420P,use->width,use->height,1));
-            uint8_t* dst[4]{}; int lines[4]{};
-            av_image_fill_arrays(dst,lines,buf.data(),AV_PIX_FMT_YUV420P,use->width,use->height,1);
-            sws_scale(sws,use->data,use->linesize,0,use->height,dst,lines);
-            SDL_UpdateYUVTexture(texture_,nullptr,dst[0],lines[0],dst[1],lines[1],dst[2],lines[2]);
+            if(sws_scale(sws,use->data,use->linesize,0,h,dst,lines)<=0) return;
         }
-        { std::lock_guard<std::mutex> lock(render_mtx);
-          SDL_RenderClear(renderer_); SDL_RenderCopy(renderer_,texture_,nullptr,nullptr); SDL_RenderPresent(renderer_); }
-        ++frames;
+
+        {
+            std::lock_guard<std::mutex> lock(pending_frame_mtx);
+            pending_frame.w=w;
+            pending_frame.h=h;
+            pending_frame.yuv420=std::move(buf);
+            pending_frame.ready=true;
+        }
     }
     void Feed(const uint8_t* data,size_t bytes){
         while(bytes){
@@ -255,7 +273,6 @@ static void NetworkThread(){
         int one=1; setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof(one));
         {std::lock_guard<std::mutex> lock(send_mtx);client_fd=fd;}
         connected=true;
-        SDL_SetWindowTitle(window_,"PadDisplay - Connected");
         const std::string hello="{\"protocol\":1,\"client\":\"linux\",\"session_mode\":\"thin_client\","
             "\"video\":\"h264\",\"audio_pcm_v2\":true,\"audio_port\":4824,"
             "\"mouse_v1\":true,\"keyboard_v1\":true,\"vaapi\":true}";
@@ -276,8 +293,6 @@ static void NetworkThread(){
             }
         }
         connected=false;
-        SDL_SetWindowTitle(window_,"PadDisplay - Waiting for host...");
-        DrawStatus("PadDisplay - Waiting for host...");
         {std::lock_guard<std::mutex> lock(send_mtx);if(client_fd==fd)client_fd=-1;}
         close(fd); Log("host disconnected");
     }
@@ -317,6 +332,42 @@ static void SendKey(const SDL_KeyboardEvent& e,bool up){
     uint16_t sc=(uint16_t)e.keysym.scancode;
     uint8_t p[6]={uint8_t(up?1:0),uint8_t(vk>>8),uint8_t(vk),uint8_t(sc>>8),uint8_t(sc),0};
     SendPacket(KEYBOARD_V1,p,sizeof(p));
+}
+
+static void RenderPendingFrame(){
+    PendingVideoFrame frame;
+    {
+        std::lock_guard<std::mutex> lock(pending_frame_mtx);
+        if(!pending_frame.ready) return;
+        frame.w=pending_frame.w;
+        frame.h=pending_frame.h;
+        frame.yuv420=std::move(pending_frame.yuv420);
+        pending_frame.ready=false;
+    }
+
+    if(frame.w<=0 || frame.h<=0 || frame.yuv420.empty() || !renderer_) return;
+
+    if(!texture_ || frame.w!=stream_w || frame.h!=stream_h){
+        stream_w=frame.w;
+        stream_h=frame.h;
+        if(texture_) SDL_DestroyTexture(texture_);
+        texture_=SDL_CreateTexture(renderer_,SDL_PIXELFORMAT_IYUV,SDL_TEXTUREACCESS_STREAMING,stream_w,stream_h);
+        Log("video mode: "+std::to_string(stream_w)+"x"+std::to_string(stream_h));
+    }
+    if(!texture_) return;
+
+    uint8_t* src[4]{};
+    int lines[4]{};
+    if(av_image_fill_arrays(src,lines,frame.yuv420.data(),AV_PIX_FMT_YUV420P,frame.w,frame.h,1)<0) return;
+
+    SDL_UpdateYUVTexture(texture_,nullptr,src[0],lines[0],src[1],lines[1],src[2],lines[2]);
+    {
+        std::lock_guard<std::mutex> lock(render_mtx);
+        SDL_RenderClear(renderer_);
+        SDL_RenderCopy(renderer_,texture_,nullptr,nullptr);
+        SDL_RenderPresent(renderer_);
+    }
+    ++frames;
 }
 
 static void DrawStatus(const char* message){
@@ -367,6 +418,7 @@ int main(){
     if(audio_dev) SDL_PauseAudioDevice(audio_dev,0); else Log(std::string("audio open failed: ")+SDL_GetError());
     std::thread net(NetworkThread),dec(DecodeThread),aud(AudioThread);
     auto last=std::chrono::steady_clock::now();
+    bool last_connected=false;
     while(running){
         SDL_Event e{};
         if(SDL_WaitEventTimeout(&e,5)){
@@ -385,6 +437,19 @@ int main(){
                 int x=0,y=0;SDL_GetMouseState(&x,&y);SendMouse(3,0,x,y,e.wheel.y*120);
             }
         }
+        bool now_connected=connected.load();
+        if(now_connected!=last_connected){
+            last_connected=now_connected;
+            if(now_connected){
+                SDL_SetWindowTitle(window_,"PadDisplay - Connected");
+            } else {
+                SDL_SetWindowTitle(window_,"PadDisplay - Waiting for host...");
+                DrawStatus("PadDisplay - Waiting for host...");
+            }
+        }
+
+        if(now_connected) RenderPendingFrame();
+
         auto now=std::chrono::steady_clock::now();
         if(now-last>=std::chrono::seconds(5)){
             Log("health connected="+std::to_string(connected.load())+
