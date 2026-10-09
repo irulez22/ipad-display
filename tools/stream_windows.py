@@ -810,7 +810,7 @@ def main():
             "-c:v",
             "h264_nvenc",
             "-preset",
-            "p1",
+            "p3",
             "-tune",
             "ull",
             "-profile:v",
