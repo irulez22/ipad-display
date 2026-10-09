@@ -42,6 +42,8 @@ static std::deque<std::vector<uint8_t>> video_q;
 static std::deque<uint8_t> audio_q;
 static constexpr size_t VIDEO_Q_MAX=8;
 static constexpr size_t AUDIO_MAX=48000*4*120/1000;
+static constexpr size_t AUDIO_START_BYTES=48000*4*40/1000;
+static bool audio_playing=false;
 static std::atomic<uint64_t> video_packets{0}, video_bytes{0}, frames{0};
 static std::atomic<uint64_t> frame_fingerprint{0};
 static std::atomic<uint64_t> frame_change_ppm{0};
@@ -152,7 +154,7 @@ struct Decoder {
             }
         }
         if(!hw) Log("decoder: software H.264 fallback");
-        ctx->thread_count=hw?1:2;
+        ctx->thread_count=hw?1:0;
         ctx->flags|=AV_CODEC_FLAG_LOW_DELAY;
         return avcodec_open2(ctx,codec,nullptr)>=0;
     }
@@ -249,9 +251,26 @@ static void DecodeThread(){
 static void AudioCallback(void*,Uint8* stream,int len){
     memset(stream,0,len);
     std::lock_guard<std::mutex> lock(audio_mtx);
-    size_t n=std::min<size_t>(len,audio_q.size()); n-=n%4;
-    for(size_t i=0;i<n;++i){stream[i]=audio_q.front();audio_q.pop_front();}
-    if(n<(size_t)len) ++audio_underruns;
+
+    if(!audio_playing){
+        if(audio_q.size()<AUDIO_START_BYTES){
+            ++audio_underruns;
+            return;
+        }
+        audio_playing=true;
+    }
+
+    size_t n=std::min<size_t>(len,audio_q.size());
+    n-=n%4;
+    for(size_t i=0;i<n;++i){
+        stream[i]=audio_q.front();
+        audio_q.pop_front();
+    }
+
+    if(n<(size_t)len){
+        audio_playing=false;
+        ++audio_underruns;
+    }
 }
 static void AudioThread(){
     int listener=Listen(4824);
@@ -263,6 +282,11 @@ static void AudioThread(){
         if(ready<=0) continue;
         int fd=accept(listener,nullptr,nullptr);
         if(fd<0) continue;
+        {
+            std::lock_guard<std::mutex> lock(audio_mtx);
+            audio_q.clear();
+            audio_playing=false;
+        }
         Log("audio connected");
         while(running){
             uint8_t h[5]; if(!ReadExact(fd,h,5)) break;
@@ -277,6 +301,11 @@ static void AudioThread(){
             while(audio_q.size()+add>AUDIO_MAX && audio_q.size()>=4)
                 for(int i=0;i<4;++i) audio_q.pop_front();
             audio_q.insert(audio_q.end(),p.begin()+off,p.end()); ++audio_packets;
+        }
+        {
+            std::lock_guard<std::mutex> lock(audio_mtx);
+            audio_q.clear();
+            audio_playing=false;
         }
         close(fd); Log("audio disconnected");
     }
