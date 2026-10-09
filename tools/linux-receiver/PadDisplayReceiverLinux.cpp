@@ -491,8 +491,9 @@ int main(){
     SDL_AudioSpec want{},got{}; want.freq=48000; want.format=AUDIO_S16LSB; want.channels=2; want.samples=1024; want.callback=AudioCallback;
     audio_dev=SDL_OpenAudioDevice(nullptr,0,&want,&got,0);
     if(audio_dev) SDL_PauseAudioDevice(audio_dev,0); else Log(std::string("audio open failed: ")+SDL_GetError());
-    std::thread net(NetworkThread),dec(DecodeThread),aud(AudioThread);
+    std::thread aud(AudioThread),net(NetworkThread),dec(DecodeThread);
     auto last=std::chrono::steady_clock::now();
+    uint64_t last_decoded=0, last_presented=0;
     bool last_connected=false;
     while(running){
         SDL_Event e{};
@@ -527,15 +528,30 @@ int main(){
 
         auto now=std::chrono::steady_clock::now();
         if(now-last>=std::chrono::seconds(5)){
+            const double elapsed=std::chrono::duration<double>(now-last).count();
+            const uint64_t decoded_now=decoded_frames.load();
+            const uint64_t presented_now=frames.load();
+            size_t video_q_depth=0;
+            {
+                std::lock_guard<std::mutex> lock(video_mtx);
+                video_q_depth=video_q.size();
+            }
+            const double decode_fps=(decoded_now-last_decoded)/elapsed;
+            const double present_fps=(presented_now-last_presented)/elapsed;
             Log("health connected="+std::to_string(connected.load())+
                 " video_packets="+std::to_string(video_packets.load())+
                 " video_bytes="+std::to_string(video_bytes.load())+
-                " decoded_frames="+std::to_string(decoded_frames.load())+
-                " frames="+std::to_string(frames.load())+
+                " decoded_frames="+std::to_string(decoded_now)+
+                " frames="+std::to_string(presented_now)+
+                " decode_fps="+std::to_string(decode_fps)+
+                " present_fps="+std::to_string(present_fps)+
+                " video_q="+std::to_string(video_q_depth)+
                 " frame_hash="+std::to_string(frame_fingerprint.load())+
                 " frame_change_ppm="+std::to_string(frame_change_ppm.load())+
                 " audio_packets="+std::to_string(audio_packets.load())+
                 " audio_underruns="+std::to_string(audio_underruns.load()));
+            last_decoded=decoded_now;
+            last_presented=presented_now;
             last=now;
         }
     }
