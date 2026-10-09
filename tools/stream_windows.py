@@ -668,13 +668,20 @@ def input_loop(sock, monitor_rect, stats=None):
 
 def audio_loop(host, port, helper_path, stats=None):
     print("Audio: connecting dedicated stream to %s:%d..." % (host, port))
-    try:
-        audio_sock = socket.create_connection((host, port), timeout=5)
-        audio_sock.settimeout(None)
-        audio_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError, TimeoutError, OSError) as exc:
-        print("Audio: dedicated connection failed: %s" % exc)
+    audio_sock = None
+    deadline = time.monotonic() + 5.0
+    last_error = None
+    while audio_sock is None and time.monotonic() < deadline:
+        try:
+            audio_sock = socket.create_connection((host, port), timeout=1)
+        except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError, TimeoutError, OSError) as exc:
+            last_error = exc
+            time.sleep(0.1)
+    if audio_sock is None:
+        print("Audio: dedicated connection failed after retries: %s" % last_error, flush=True)
         return
+    audio_sock.settimeout(None)
+    audio_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     hello = ('{"protocol":%d,"host":"windows","channel":"audio","audio_pcm_v2":true}' %
              PROTOCOL_VERSION).encode("utf-8")
