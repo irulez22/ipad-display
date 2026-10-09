@@ -73,10 +73,26 @@ public static class PadDisplayMode {
   public const int DM_PELSWIDTH = 0x00080000;
   public const int DM_PELSHEIGHT = 0x00100000;
   public const int DM_DISPLAYFREQUENCY = 0x00400000;
+  public const int ENUM_CURRENT_SETTINGS = -1;
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool EnumDisplaySettings(string d, int n, ref DEVMODE m);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int ChangeDisplaySettingsEx(string d, ref DEVMODE m, IntPtr h, int f, IntPtr p);
 }
 "@
+
+function Get-PhysicalDisplayMode($Device) {
+  $dm = New-Object PadDisplayMode+DEVMODE
+  $dm.dmSize = [Runtime.InteropServices.Marshal]::SizeOf([type][PadDisplayMode+DEVMODE])
+  if (-not [PadDisplayMode]::EnumDisplaySettings($Device, [PadDisplayMode]::ENUM_CURRENT_SETTINGS, [ref]$dm)) {
+    return $null
+  }
+  [pscustomobject]@{
+    X = [int]$dm.dmPositionX
+    Y = [int]$dm.dmPositionY
+    W = [int]$dm.dmPelsWidth
+    H = [int]$dm.dmPelsHeight
+    Hz = [int]$dm.dmDisplayFrequency
+  }
+}
 
 function Test-TcpPort($HostName, $Port, $TimeoutMs=400) {
   $client = New-Object System.Net.Sockets.TcpClient
@@ -237,7 +253,10 @@ if (-not $vdd) { throw "Signed Virtual Display Driver is not active." }
 $screens = @([System.Windows.Forms.Screen]::AllScreens)
 for ($i=0; $i -lt $screens.Count; $i++) {
   $s=$screens[$i]; $p=if($s.Primary){" [primary]"}else{""}
-  Write-Host ("[{0}] {1} {2}x{3}{4}" -f ($i+1),$s.DeviceName,$s.Bounds.Width,$s.Bounds.Height,$p)
+  $physical=Get-PhysicalDisplayMode $s.DeviceName
+  $w=if($physical){$physical.W}else{$s.Bounds.Width}
+  $h=if($physical){$physical.H}else{$s.Bounds.Height}
+  Write-Host ("[{0}] {1} {2}x{3}{4}" -f ($i+1),$s.DeviceName,$w,$h,$p)
 }
 $defaultScreen=1
 $preferredScreenIndex = -1
@@ -250,8 +269,10 @@ for ($i=0; $i -lt $screens.Count; $i++) {
 }
 if ($preferredScreenIndex -lt 0) {
   for ($i=0; $i -lt $screens.Count; $i++) {
-    if ($screens[$i].Bounds.Width -eq $preferredDisplayWidth -and
-        $screens[$i].Bounds.Height -eq $preferredDisplayHeight) {
+    $physical=Get-PhysicalDisplayMode $screens[$i].DeviceName
+    $w=if($physical){$physical.W}else{$screens[$i].Bounds.Width}
+    $h=if($physical){$physical.H}else{$screens[$i].Bounds.Height}
+    if ($w -eq $preferredDisplayWidth -and $h -eq $preferredDisplayHeight) {
       $preferredScreenIndex = $i
       break
     }
@@ -260,10 +281,11 @@ if ($preferredScreenIndex -lt 0) {
 
 if ($preferredScreenIndex -ge 0) {
   $defaultScreen = $preferredScreenIndex + 1
+  $physical=Get-PhysicalDisplayMode $screens[$preferredScreenIndex].DeviceName
+  $w=if($physical){$physical.W}else{$screens[$preferredScreenIndex].Bounds.Width}
+  $h=if($physical){$physical.H}else{$screens[$preferredScreenIndex].Bounds.Height}
   Write-Host ("Auto-selected PadDisplay target: {0} {1}x{2}" -f
-    $screens[$preferredScreenIndex].DeviceName,
-    $screens[$preferredScreenIndex].Bounds.Width,
-    $screens[$preferredScreenIndex].Bounds.Height) -ForegroundColor Green
+    $screens[$preferredScreenIndex].DeviceName,$w,$h) -ForegroundColor Green
 } else {
   for($i=$screens.Count-1;$i -ge 0;$i--){
     if(-not $screens[$i].Primary){$defaultScreen=$i+1;break}
@@ -337,6 +359,10 @@ if ($restarted) {
 }
 Set-DisplayMode $screen.DeviceName $mode.W $mode.H $fps
 Start-Sleep 2
+$physicalMode=Get-PhysicalDisplayMode $screen.DeviceName
+if($physicalMode){
+  Write-Host ("Physical display mode: {0}x{1}@{2}, origin {3},{4}" -f $physicalMode.W,$physicalMode.H,$physicalMode.Hz,$physicalMode.X,$physicalMode.Y) -ForegroundColor DarkGray
+}
 $size="$($mode.W)x$($mode.H)"
 Write-Host "Finding DXGI output for $size..."
 $foundAdapter=$null; $foundOutput=$null
@@ -413,8 +439,8 @@ while ($true) {
     "--fps", [string]$fps,
     "--bitrate", $bitrate,
     "--size", $size,
-    "--touch-left", [string]$screen.Bounds.X,
-    "--touch-top", [string]$screen.Bounds.Y,
+    "--touch-left", [string]$(if($physicalMode){$physicalMode.X}else{$screen.Bounds.X}),
+    "--touch-top", [string]$(if($physicalMode){$physicalMode.Y}else{$screen.Bounds.Y}),
     "--touch-width", [string]$mode.W,
     "--touch-height", [string]$mode.H,
     "--status-file", ("`"" + $statusFile + "`""),
