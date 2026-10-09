@@ -36,14 +36,13 @@ static std::atomic<bool> running{true}, connected{false};
 static int client_fd=-1;
 static std::mutex send_mtx, log_mtx;
 static std::ofstream log_file;
-static std::mutex video_mtx, audio_mtx;
+static std::mutex video_mtx;
 static std::condition_variable video_cv;
 static std::deque<std::vector<uint8_t>> video_q;
-static std::deque<uint8_t> audio_q;
 static constexpr size_t VIDEO_Q_MAX=8;
 static constexpr size_t AUDIO_MAX=48000*4*120/1000;
 static constexpr size_t AUDIO_START_BYTES=48000*4*40/1000;
-static bool audio_playing=false;
+static std::atomic<bool> audio_playing{false};
 static std::atomic<uint64_t> video_packets{0}, video_bytes{0}, decoded_frames{0}, frames{0};
 static std::atomic<uint64_t> frame_fingerprint{0};
 static std::atomic<uint64_t> frame_change_ppm{0};
@@ -249,30 +248,13 @@ static void DecodeThread(){
         d.Feed(chunk.data(),chunk.size());
     }
 }
-static void AudioCallback(void*,Uint8* stream,int len){
-    memset(stream,0,len);
-    std::lock_guard<std::mutex> lock(audio_mtx);
-
-    if(!audio_playing){
-        if(audio_q.size()<AUDIO_START_BYTES){
-            ++audio_underruns;
-            return;
-        }
-        audio_playing=true;
-    }
-
-    size_t n=std::min<size_t>(len,audio_q.size());
-    n-=n%4;
-    for(size_t i=0;i<n;++i){
-        stream[i]=audio_q.front();
-        audio_q.pop_front();
-    }
-
-    if(n<(size_t)len){
-        audio_playing=false;
-        ++audio_underruns;
-    }
+static void ResetAudioPlayback(){
+    if(!audio_dev) return;
+    SDL_PauseAudioDevice(audio_dev,1);
+    SDL_ClearQueuedAudio(audio_dev);
+    audio_playing=false;
 }
+
 static void AudioThread(){
     int listener=Listen(4824);
     if(listener<0){Log("audio listen failed");return;}
@@ -283,32 +265,49 @@ static void AudioThread(){
         if(ready<=0) continue;
         int fd=accept(listener,nullptr,nullptr);
         if(fd<0) continue;
-        {
-            std::lock_guard<std::mutex> lock(audio_mtx);
-            audio_q.clear();
-            audio_playing=false;
-        }
+
+        ResetAudioPlayback();
         Log("audio connected");
+
         while(running){
-            uint8_t h[5]; if(!ReadExact(fd,h,5)) break;
+            uint8_t h[5];
+            if(!ReadExact(fd,h,5)) break;
             uint32_t n=(uint32_t(h[0])<<24)|(uint32_t(h[1])<<16)|(uint32_t(h[2])<<8)|h[3];
             if(n>4*1024*1024) break;
-            std::vector<uint8_t> p(n); if(n&&!ReadExact(fd,p.data(),n)) break;
+            std::vector<uint8_t> p(n);
+            if(n&&!ReadExact(fd,p.data(),n)) break;
+
             size_t off=0;
             if(h[4]==AUDIO_PCM_V2 && n>=12) off=12;
             else if(h[4]!=AUDIO_PCM) continue;
-            std::lock_guard<std::mutex> lock(audio_mtx);
-            size_t add=p.size()-off;
-            while(audio_q.size()+add>AUDIO_MAX && audio_q.size()>=4)
-                for(int i=0;i<4;++i) audio_q.pop_front();
-            audio_q.insert(audio_q.end(),p.begin()+off,p.end()); ++audio_packets;
+
+            size_t usable=(p.size()-off)&~size_t(3);
+            if(!usable || !audio_dev) continue;
+
+            Uint32 queued=SDL_GetQueuedAudioSize(audio_dev);
+            if(queued>AUDIO_MAX){
+                SDL_ClearQueuedAudio(audio_dev);
+                audio_playing=false;
+                ++audio_underruns;
+                queued=0;
+            }
+
+            if(SDL_QueueAudio(audio_dev,p.data()+off,(Uint32)usable)!=0){
+                Log(std::string("SDL_QueueAudio failed: ")+SDL_GetError());
+                continue;
+            }
+            ++audio_packets;
+
+            queued=SDL_GetQueuedAudioSize(audio_dev);
+            if(!audio_playing.load() && queued>=AUDIO_START_BYTES){
+                SDL_PauseAudioDevice(audio_dev,0);
+                audio_playing=true;
+            }
         }
-        {
-            std::lock_guard<std::mutex> lock(audio_mtx);
-            audio_q.clear();
-            audio_playing=false;
-        }
-        close(fd); Log("audio disconnected");
+
+        ResetAudioPlayback();
+        close(fd);
+        Log("audio disconnected");
     }
     close(listener);
 }
@@ -489,9 +488,22 @@ int main(){
     if(!status_font) Log(std::string("status font unavailable: ")+TTF_GetError());
     SDL_SetWindowTitle(window_,"PadDisplay - Waiting for host...");
     DrawStatus("PadDisplay - Waiting for host...");
-    SDL_AudioSpec want{},got{}; want.freq=48000; want.format=AUDIO_S16LSB; want.channels=2; want.samples=1024; want.callback=AudioCallback;
+    SDL_AudioSpec want{},got{};
+    want.freq=48000;
+    want.format=AUDIO_S16LSB;
+    want.channels=2;
+    want.samples=512;
+    want.callback=nullptr;
     audio_dev=SDL_OpenAudioDevice(nullptr,0,&want,&got,0);
-    if(audio_dev) SDL_PauseAudioDevice(audio_dev,0); else Log(std::string("audio open failed: ")+SDL_GetError());
+    if(audio_dev){
+        SDL_PauseAudioDevice(audio_dev,1);
+        Log("audio device: freq="+std::to_string(got.freq)+
+            " format="+std::to_string((unsigned)got.format)+
+            " channels="+std::to_string((unsigned)got.channels)+
+            " samples="+std::to_string(got.samples));
+    } else {
+        Log(std::string("audio open failed: ")+SDL_GetError());
+    }
     std::thread aud(AudioThread),net(NetworkThread),dec(DecodeThread);
     auto last=std::chrono::steady_clock::now();
     uint64_t last_decoded=0, last_presented=0;
@@ -552,7 +564,8 @@ int main(){
                 " frame_hash="+std::to_string(frame_fingerprint.load())+
                 " frame_change_ppm="+std::to_string(frame_change_ppm.load())+
                 " audio_packets="+std::to_string(audio_packets.load())+
-                " audio_underruns="+std::to_string(audio_underruns.load()));
+                " audio_queued="+std::to_string(audio_dev?SDL_GetQueuedAudioSize(audio_dev):0)+
+                " audio_resets="+std::to_string(audio_underruns.load()));
             last_decoded=decoded_now;
             last_presented=presented_now;
             last=now;
