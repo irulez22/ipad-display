@@ -40,6 +40,9 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 $ipadIpFallback = "192.168.68.51"
 $statusFile = Join-Path $env:LOCALAPPDATA "PadDisplay\status.json"
+$stopFile = Join-Path $env:LOCALAPPDATA "PadDisplay\stop.request"
+New-Item -ItemType Directory -Force -Path (Split-Path $statusFile) | Out-Null
+Start-Transcript -Path (Join-Path (Split-Path $statusFile) "engine.log") -Append | Out-Null
 $preferredDisplayName = "\\.\DISPLAY5"
 $preferredDisplayWidth = 1365
 $preferredDisplayHeight = 1024
@@ -155,27 +158,26 @@ function Start-UsbProxy {
   if ($p -and -not $p.HasExited) { $p | Stop-Process -Force -ErrorAction SilentlyContinue }
   return $null
 }
-function Ensure-WasapiHelper {
-  if (-not (Test-Path $wasapiSource)) { throw "WASAPI helper source not found at $wasapiSource." }
+function Ensure-WindowsHelper($Source, $Name, $Libraries) {
+  if (-not (Test-Path -LiteralPath $Source)) { throw "Helper source not found: $Source" }
   New-Item -ItemType Directory -Force -Path $audioBuildDir | Out-Null
-  $needBuild = -not (Test-Path $wasapiExe)
-  if (-not $needBuild) {
-    $needBuild = (Get-Item $wasapiSource).LastWriteTimeUtc -gt (Get-Item $wasapiExe).LastWriteTimeUtc
-  }
-  if (-not $needBuild) { return $wasapiExe }
+  $output = Join-Path $audioBuildDir $Name
+  if ((Test-Path -LiteralPath $output) -and (Get-Item $output).LastWriteTimeUtc -ge (Get-Item $Source).LastWriteTimeUtc) { return $output }
+  $vswhere = Join-Path ([Environment]::GetEnvironmentVariable("ProgramFiles(x86)")) "Microsoft Visual Studio\Installer\vswhere.exe"
+  $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+  if (-not $install) { throw "Visual Studio C++ build tools are required to compile $Name." }
+  $vsDev = Join-Path $install "Common7\Tools\VsDevCmd.bat"
+  $localSource = Join-Path $audioBuildDir ([IO.Path]::GetFileName($Source))
+  Copy-Item -LiteralPath $Source -Destination $localSource -Force
+  $object = [IO.Path]::ChangeExtension($output, ".obj")
+  $command = 'call "' + $vsDev + '" -arch=x64 -host_arch=x64 >nul && cl /nologo /EHsc /O2 "' + $localSource + '" /Fo:"' + $object + '" /Fe:"' + $output + '" ' + ($Libraries -join ' ')
+  & cmd.exe /c $command | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "Build failed: $Name" }
+  return $output
+}
 
-  $vsDev = "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
-  if (-not (Test-Path $vsDev)) { throw "Visual Studio VsDevCmd.bat not found; cannot build WASAPI helper." }
-
-  $localSource = Join-Path $audioBuildDir "wasapi_loopback.cpp"
-  Copy-Item $wasapiSource $localSource -Force
-  Write-Host "Building WASAPI loopback helper..." -ForegroundColor Cyan
-  $cmd = ('call "{0}" -arch=x64 -host_arch=x64 >nul && cl /nologo /EHsc /O2 "{1}" /Fe:"{2}" ole32.lib' -f $vsDev,$localSource,$wasapiExe)
-  & cmd.exe /c $cmd
-  if ($LASTEXITCODE -ne 0 -or -not (Test-Path $wasapiExe)) {
-    throw "Failed to build WASAPI loopback helper."
-  }
-  return $wasapiExe
+function Ensure-WasapiHelper {
+  return Ensure-WindowsHelper $wasapiSource "wasapi_loopback.exe" @("ole32.lib")
 }
 
 function Register-UsbDeviceEvents {
@@ -198,7 +200,7 @@ function Read-Choice($Prompt, $Default, $Min, $Max) {
   }
 }
 
-function Ensure-VddMode($Width, $Height, $Hz) {
+function Ensure-VddMode($Width, $Height, $Hz, [switch]$DeferRestart) {
   $path = "C:\VirtualDisplayDriver\vdd_settings.xml"
   if (-not (Test-Path $path)) { throw "VDD config not found at $path." }
   [xml]$xml = Get-Content $path
@@ -220,6 +222,7 @@ function Ensure-VddMode($Width, $Height, $Hz) {
   }
   Copy-Item $path "$path.launcher.bak" -Force
   $xml.Save($path)
+  if ($DeferRestart) { return $true }
   Write-Host ("Added {0}x{1}@{2} to VDD config; restarting signed VDD..." -f $Width,$Height,$Hz)
   Get-PnpDevice | Where-Object { $_.FriendlyName -eq "Virtual Display Driver" } | Disable-PnpDevice -Confirm:$false
   Start-Sleep 2
@@ -246,6 +249,29 @@ function Set-DisplayMode($Device, $Width, $Height, $Hz) {
 }
 
 Write-Host ""
+function Stop-StreamerTree($Process) {
+  if ($Process -and -not $Process.HasExited) {
+    & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+  }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ReceiverHost)) {
+  if ($Resolution -notmatch '^(\d+)x(\d+)$') { throw "Invalid resolution: $Resolution" }
+  $mode = @{ W=[int]$Matches[1]; H=[int]$Matches[2] }
+  if ($mode.W -le 0 -or $mode.H -le 0 -or $mode.W % 2 -or $mode.H % 2) { throw "Resolution must have positive even dimensions." }
+  if ($Fps -notin @(30,60)) { throw "FPS must be 30 or 60." }
+  if ([string]::IsNullOrWhiteSpace($Bitrate)) { $Bitrate = "8M" }
+  $fps = $Fps
+  $bitrate = $Bitrate
+  $pythonExe = (Get-Command python.exe -ErrorAction Stop).Source
+  . (Join-Path $PSScriptRoot "cloudbook_session.ps1")
+  $cloudbookAdapter = Get-CloudbookAdapter
+  Set-CloudbookDisplay $cloudbookAdapter $false
+  [void](Ensure-VddMode $mode.W $mode.H $fps -DeferRestart)
+  Start-CloudbookSessions
+  exit
+}
+
 Write-Host "=== PadDisplay launcher ==="
 $vdd = Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "OK" -and $_.FriendlyName -eq "Virtual Display Driver" } | Select-Object -First 1
 if (-not $vdd) { throw "Signed Virtual Display Driver is not active." }
@@ -393,13 +419,8 @@ $usbProxy = $null
 $forceWifiNext = $false
 Register-UsbDeviceEvents
 
-function Stop-StreamerTree($Process) {
-  if ($Process -and -not $Process.HasExited) {
-    & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
-  }
-}
 
-while ($true) {
+while (-not (Test-Path -LiteralPath $stopFile)) {
   $usingUsb = $false
   $usingWindowsReceiver = -not [string]::IsNullOrWhiteSpace($ReceiverHost)
 
@@ -455,6 +476,7 @@ while ($true) {
   $switchToUsb = $false
 
   while (-not $streamProc.HasExited) {
+    if (Test-Path -LiteralPath $stopFile) { Stop-StreamerTree $streamProc; break }
     if (-not $NonInteractive -and [Console]::KeyAvailable) {
       $key = [Console]::ReadKey($true).Key
       if ($key -eq [ConsoleKey]::R) {
@@ -529,3 +551,5 @@ while ($true) {
 
   Start-Sleep 1
 }
+Clear-UsbDeviceEvents
+Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue

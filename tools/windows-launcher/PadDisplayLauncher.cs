@@ -28,6 +28,9 @@ class PadDisplayLauncher : Form
     static readonly string StatusFile = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "PadDisplay", "status.json");
+    static readonly string StopFile = Path.Combine(Path.GetDirectoryName(StatusFile), "stop.request");
+    bool stopping;
+    const string AutomaticDisplay = "Cloudbook display (automatic)";
     const string PreferredDisplayName = @"\\.\DISPLAY5";
     const int PreferredDisplayWidth = 1365;
     const int PreferredDisplayHeight = 1024;
@@ -96,6 +99,8 @@ class PadDisplayLauncher : Form
         Controls.Add(log); Controls.Add(status); Controls.Add(top);
 
         PopulateDisplays(); LoadSettings();
+        ConfigureDisplayChoice();
+        receiverHost.TextChanged += delegate { ConfigureDisplayChoice(); };
         telemetryTimer.Interval = 1000;
         telemetryTimer.Tick += delegate { UpdateTelemetry(); };
         telemetryTimer.Start();
@@ -105,7 +110,7 @@ class PadDisplayLauncher : Form
             bitrate.Text = r=="1024x768"?"4M":r=="1280x960"?"6M":r=="1600x1200"?"10M":r=="1366x768"?"8M":r=="1920x1080"?"12M":"16M";
         };
         start.Click += delegate { StartEngine(); };
-        stop.Click += delegate { StopEngine(); };
+        stop.Click += async delegate { await StopEngine(); };
         save.Click += delegate { SaveSettings(); ApplyStartup(); Append("Settings saved."); };
         diagnostics.Click += delegate { CollectDiagnostics(); };
 
@@ -113,8 +118,8 @@ class PadDisplayLauncher : Form
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open",null,delegate { Show(); WindowState=FormWindowState.Normal; Activate(); });
         menu.Items.Add("Start",null,delegate { StartEngine(); });
-        menu.Items.Add("Stop",null,delegate { StopEngine(); });
-        menu.Items.Add("Exit",null,delegate { StopEngine(); tray.Visible=false; Environment.Exit(0); });
+        menu.Items.Add("Stop",null,async delegate { await StopEngine(); });
+        menu.Items.Add("Exit",null,async delegate { if(await StopEngine()) { tray.Visible=false; Environment.Exit(0); } });
         tray.ContextMenuStrip=menu;
         tray.DoubleClick += delegate { Show(); WindowState=FormWindowState.Normal; Activate(); };
 
@@ -133,6 +138,22 @@ class PadDisplayLauncher : Form
         p.Controls.Add(ac,1,row);
         p.Controls.Add(new Label {Text=b,AutoSize=true,Anchor=AnchorStyles.Left},2,row);
         p.Controls.Add(bc,3,row);
+    }
+
+    void ConfigureDisplayChoice()
+    {
+        bool automatic = !String.IsNullOrWhiteSpace(receiverHost.Text);
+        display.Enabled = !automatic;
+        if(automatic)
+        {
+            if(!display.Items.Contains(AutomaticDisplay)) display.Items.Add(AutomaticDisplay);
+            display.SelectedItem = AutomaticDisplay;
+        }
+        else if(display.Items.Contains(AutomaticDisplay))
+        {
+            display.Items.Remove(AutomaticDisplay);
+            if(display.Items.Count > 0) display.SelectedIndex = 0;
+        }
     }
 
     int FindPreferredDisplayIndex()
@@ -190,7 +211,7 @@ class PadDisplayLauncher : Form
         resolution.SelectedItem=resolution.Items.Contains(r)?r:"1280x960";
         string f=ReadReg("Fps","60"); fps.SelectedItem=f=="30"?"30":"60";
         bitrate.Text=ReadReg("Bitrate","6M");
-        receiverHost.Text=ReadReg("ReceiverHost","");
+        receiverHost.Text=ReadReg("ReceiverHost","auto");
         startup.Checked=ReadReg("StartWithWindows","False")=="True";
         autostart.Checked=ReadReg("AutoStartStream","False")=="True";
         minimized.Checked=ReadReg("StartMinimized","False")=="True";
@@ -271,11 +292,13 @@ class PadDisplayLauncher : Form
 
     void StartEngine()
     {
+        if(stopping || !start.Enabled) return;
         SaveSettings();
         try { if(File.Exists(StatusFile)) File.Delete(StatusFile); } catch {}
         if(!EnsureEngineTask()) return;
         try
         {
+            if(File.Exists(StopFile)) File.Delete(StopFile);
             var p=Process.Start(new ProcessStartInfo("schtasks.exe",
                 "/Run /TN \"" + TaskName + "\""){UseShellExecute=false,CreateNoWindow=true});
             p.WaitForExit();
@@ -292,20 +315,46 @@ class PadDisplayLauncher : Form
         }
     }
 
-    void StopEngine()
+    async System.Threading.Tasks.Task<bool> StopEngine()
     {
+        if(stopping) return false;
+        stopping=true;
+        start.Enabled=false;
+        stop.Enabled=false;
         try
         {
-            var p=Process.Start(new ProcessStartInfo("schtasks.exe",
-                "/End /TN \"" + TaskName + "\""){UseShellExecute=false,CreateNoWindow=true});
-            p.WaitForExit();
+            Directory.CreateDirectory(Path.GetDirectoryName(StopFile));
+            File.WriteAllText(StopFile, "stop");
+            status.Text="Stopping and removing Cloudbook display...";
+            using(var process=Process.Start(new ProcessStartInfo("powershell.exe",
+                "-NoProfile -Command \"if ((Get-ScheduledTask -TaskName 'PadDisplay Engine' -ErrorAction SilentlyContinue).State -in @('Running','Queued')) { exit 1 }\"")
+                {UseShellExecute=false,CreateNoWindow=true}))
+            {
+                await System.Threading.Tasks.Task.Run(() => process.WaitForExit());
+                if(process.ExitCode==0) File.Delete(StopFile);
+            }
+            for(int i=0;i<80;i++)
+            {
+                if(!File.Exists(StopFile))
+                {
+                    status.Text="Stopped";
+                    start.Enabled=true;
+                    Append("Engine stopped.");
+                    return true;
+                }
+                await System.Threading.Tasks.Task.Delay(250);
+            }
+            status.Text="Stop pending; engine cleanup has not completed.";
+            stop.Enabled=true;
+            return false;
         }
-        catch {}
-        try { if(File.Exists(StatusFile)) File.Delete(StatusFile); } catch {}
-        status.Text="Stopped";
-        start.Enabled=true;
-        stop.Enabled=false;
-        Append("PadDisplay engine stopped.");
+        catch(Exception ex)
+        {
+            Append("Stop failed: "+ex.Message);
+            stop.Enabled=true;
+            return false;
+        }
+        finally { stopping=false; }
     }
 
     string JsonValue(System.Collections.Generic.Dictionary<string, object> data, string key)
@@ -317,17 +366,27 @@ class PadDisplayLauncher : Form
 
     void UpdateTelemetry()
     {
+        if(stopping) return;
         try
         {
             if(!File.Exists(StatusFile)) return;
+            var json = new System.Web.Script.Serialization.JavaScriptSerializer()
+                .Deserialize<System.Collections.Generic.Dictionary<string, object>>(File.ReadAllText(StatusFile));
+            string state = JsonValue(json, "state");
+            if(state == "waiting" || state == "connecting" || state == "stopped")
+            {
+                status.Text = JsonValue(json, "message");
+                start.Enabled = state == "stopped";
+                stop.Enabled = state != "stopped";
+                return;
+            }
             if((DateTime.UtcNow - File.GetLastWriteTimeUtc(StatusFile)).TotalSeconds > 5)
             {
-                status.Text = "Engine running • telemetry stale";
+                status.Text = "No recent telemetry; engine may be reconnecting or stopped.";
+                stop.Enabled=true;
                 return;
             }
 
-            var json = new System.Web.Script.Serialization.JavaScriptSerializer()
-                .Deserialize<System.Collections.Generic.Dictionary<string, object>>(File.ReadAllText(StatusFile));
             string transport = JsonValue(json, "transport");
             string host = JsonValue(json, "host");
             string video = JsonValue(json, "video_mbps");

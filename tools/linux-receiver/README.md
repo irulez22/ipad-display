@@ -27,8 +27,17 @@ sh tools/linux-receiver/build.sh
 sh tools/linux-receiver/run.sh
 ```
 
-The client listens on TCP 4822 for video/control and TCP 4824 for PCM audio.
-Set **Receiver host** on the desktop to the Cloudbook's LAN IP.
+The client listens on UDP 4821 for LAN discovery, TCP 4822 for video/control,
+and TCP 4824 for PCM audio. Set **Receiver host** on the desktop to **auto**
+(the default). The host discovers the receiver again after each disconnect,
+so DHCP address changes need no settings update. Both machines must share a
+LAN that allows broadcasts. With multiple receivers, enter the desired Linux
+hostname; a fixed IP remains supported.
+
+The Windows host enables the installed Virtual Display Driver only while the
+Cloudbook is connected, selects its actual DXGI output, and disables it on
+disconnect or Stop. Your physical displays stay enabled. Leave the engine
+running to wait for the next connection.
 
 Architecture:
 
@@ -41,12 +50,12 @@ SDL2 input     -> MOUSE_V1 / KEYBOARD_V1 -> desktop host
 Local controls: F11 toggles fullscreen, Escape leaves fullscreen, and
 Ctrl+Shift+Q exits. Logs are written to `~/.local/state/paddisplay/receiver.log`.
 
-The receiver prefers VA-API decode and transfers frames to CPU memory for
-OpenGL YUV texture uploads. Color conversion happens in a GPU shader. On older
-Intel i965 hardware where VA surface readback is unavailable, run with
-PADDISPLAY_DISABLE_VAAPI=1 for software decoding. The desktop launcher currently
-sets this compatibility override for the Cloudbook; the direct run.sh path
-uses your environment.
+The receiver prefers VA-API. Direct surface mapping and an optimized copy from
+GPU memory support older Intel i965 hardware, including the Cloudbook's Braswell
+GPU. Drivers without direct mapping use normal frame download. The launchers no
+longer force software decoding. For troubleshooting, you can still run:
+
+    PADDISPLAY_DISABLE_VAAPI=1 sh tools/linux-receiver/run.sh
 
 ## Updating
 
@@ -70,12 +79,15 @@ reset, fragmented socket reads, and shutdown on an idle connection.
 
 Each new video connection resets the H.264 parser/decoder before processing new
 data. Audio defaults to 48 kHz stereo signed 16-bit PCM, supports the optional
-format handshake, and keeps queued audio bounded to 120 ms. After an underrun,
-it pauses to rebuild its 40 ms prebuffer.
+format handshake, and keeps queued audio bounded to 480 ms. After an underrun,
+it pauses to rebuild its 240 ms prebuffer.
 
 Keyboard letters, digits, common punctuation, navigation, modifiers, and keypad
 keys are mapped. Punctuation uses Windows OEM virtual keys, so matching keyboard
 layouts on both machines are still important. F11 remains local.
 
-Hardware playback, VA-API readback, desktop focus behavior, and end-to-end
-latency still need verification on the actual laptop.
+Measured end-to-end input latency and subjective speaker quality still require
+interactive testing.
+
+Cloudbook calibration on the tested Wi-Fi: 1366x768, 30 fps, 4M bitrate.
+The audio prebuffer favors stable playback over minimum audio latency.

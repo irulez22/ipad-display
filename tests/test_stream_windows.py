@@ -119,8 +119,10 @@ class StreamTests(unittest.TestCase):
         proc.poll.return_value = None
         with patch.object(stream.socket, "create_connection", return_value=sock), patch.object(
             stream.subprocess, "Popen", side_effect=[proc, OSError("missing converter")]
-        ):
+        ) as popen:
             stream.audio_loop("localhost", 4824, "helper", "ffmpeg")
+        command = popen.call_args_list[1].args[0]
+        self.assertEqual(command[command.index("-flush_packets") + 1], "1")
         proc.terminate.assert_called_once()
         self.assertTrue(proc.stdout.closed)
         sock.close.assert_called_once()

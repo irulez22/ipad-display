@@ -1,5 +1,7 @@
 #define _WIN32_WINNT 0x0A00
 #include <windows.h>
+#include <io.h>
+#include <fcntl.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <mmreg.h>
@@ -116,8 +118,16 @@ static int16_t to_s16(float v)
     return (int16_t)sample;
 }
 
+static bool prepare_pcm_output()
+{
+    // Text mode inserts CR bytes into binary samples containing 0x0A.
+    if (_setmode(_fileno(stdout), _O_BINARY) == -1) return false;
+    return setvbuf(stdout, nullptr, _IONBF, 0) == 0;
+}
+
 int wmain()
 {
+    if (!prepare_pcm_output()) return 2;
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) return 2;
 
@@ -126,6 +136,8 @@ int wmain()
     IAudioClient *audio = nullptr;
     IAudioCaptureClient *capture = nullptr;
     WAVEFORMATEX *mix = nullptr;
+    AudioFormatInfo inputFmt;
+    const char *formatName = nullptr;
 
     hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                           __uuidof(IMMDeviceEnumerator), (void **)&enumerator);
@@ -140,7 +152,6 @@ int wmain()
     hr = audio->GetMixFormat(&mix);
     if (FAILED(hr) || !mix) goto fail;
 
-    AudioFormatInfo inputFmt;
     if (!parse_format(mix, inputFmt)) {
         fwprintf(stderr, L"Unsupported Windows mix format: tag=%u channels=%u rate=%lu bits=%u align=%u\n",
                  mix->wFormatTag, mix->nChannels, mix->nSamplesPerSec,
@@ -149,7 +160,6 @@ int wmain()
         goto fail;
     }
 
-    const char *formatName = nullptr;
     if (inputFmt.isFloat && inputFmt.containerBits == 32) formatName = "f32";
     else if (inputFmt.isPCM && inputFmt.containerBits == 16) formatName = "s16";
     else if (inputFmt.isPCM && inputFmt.containerBits == 32) formatName = "s32";
@@ -165,7 +175,7 @@ int wmain()
              inputFmt.isFloat ? L" float" : L" PCM", inputFmt.blockAlign);
 
     // Loopback capture is most reliable when initialized with the endpoint's
-    // own shared-mode mix format. Linux performs conversion with SDL_AudioStream.
+    // own shared-mode mix format. The host converts it to the PCM wire format.
     hr = audio->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -184,8 +194,6 @@ int wmain()
 
     hr = audio->Start();
     if (FAILED(hr)) goto fail;
-
-    setvbuf(stdout, nullptr, _IONBF, 0);
 
     // One ASCII metadata line precedes the binary PCM stream. stream_windows.py
     // consumes this line and forwards a compact AUDIO_FORMAT packet to Linux.

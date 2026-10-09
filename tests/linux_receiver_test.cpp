@@ -5,6 +5,13 @@
 #include <iterator>
 
 int main(){
+    const std::string nonce(32,'a');
+    auto reply=DiscoveryReply("PADDISPLAY_DISCOVER_V1 "+nonce);
+    assert(reply.find("PADDISPLAY_RECEIVER_V1 "+nonce+" ")==0);
+    assert(reply.substr(reply.size()-10)==" 4822 4824");
+    assert(DiscoveryReply("PADDISPLAY_DISCOVER_V1 bad").empty());
+    assert(DiscoveryReply("PADDISPLAY_DISCOVER_V1 "+std::string(32,'z')).empty());
+    assert(DiscoveryReply("PADDISPLAY_DISCOVER_V1 "+nonce+" extra").empty());
     int sockets[2];
     assert(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0);
     client_fd=sockets[0];
@@ -39,7 +46,7 @@ int main(){
     std::vector<uint8_t> pcm(AUDIO_MAX*2,0);
     QueuePCM(pcm.data(),3840);
     assert(!audio_playing && SDL_GetQueuedAudioSize(audio_dev)==3840);
-    QueuePCM(pcm.data(),3840);
+    QueuePCM(pcm.data(),AUDIO_START_BYTES-3840);
     assert(audio_playing);
     SDL_PauseAudioDevice(audio_dev,1);
     SDL_ClearQueuedAudio(audio_dev);

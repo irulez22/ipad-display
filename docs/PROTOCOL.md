@@ -72,3 +72,13 @@ Current channel responsibilities are:
 The laptop path uses native mouse and keyboard input as first-class controls. Touch injection is optional and lazily initialized only when TOUCH_V1/TOUCH_V2 packets are actually received, so failure or absence of touch support cannot disable mouse, keyboard, wheel or trackpad scrolling.
 
 The receiver keeps video decode and presentation on bounded worker queues. The access-unit queue is capped at two AUs and the presentation queue at one decoded frame. Producers block briefly when a queue is full rather than intentionally discarding frames, limiting runaway latency while preserving lossless backpressure.
+
+
+### Linux LAN discovery
+
+The Linux receiver answers UDP 4821 queries on the local LAN. The host sends
+PADDISPLAY_DISCOVER_V1 followed by a fresh 32-character lowercase hex nonce.
+The reply is PADDISPLAY_RECEIVER_V1 followed by the nonce, hostname, 4822 and
+4824, separated by single spaces. The host validates the nonce, hostname and
+ports, and connects to the reply's source address. Auto mode connects only when
+exactly one receiver responds. Discovery does not authenticate peers.

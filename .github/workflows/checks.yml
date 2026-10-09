@@ -17,6 +17,16 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m unittest discover -s tests -v
+      - name: Check binary PCM output
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
+          python -m unittest discover -s tests -p test_wasapi_output.py -v
+      - name: Check display lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/test_cloudbook_display.ps1
       - name: Compile launcher without installing it
         if: runner.os == 'Windows'
         shell: pwsh

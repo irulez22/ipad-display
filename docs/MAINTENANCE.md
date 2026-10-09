@@ -41,4 +41,30 @@ The Linux path is the active development target. Added correct virtual-key
 encoding, decoder reset on reconnect, FFmpeg input padding, audio disconnect
 handling, legacy PCM compatibility, validated audio formats, and bounded audio
 rebuffering. All 16 regression checks pass, including headless native tests.
-run.sh rebuilds after source changes. No deployment to the laptop was performed.
+run.sh rebuilds after source changes. See the subsequent hardware verification below.
+
+
+## Cloudbook hardware verification (2026-10-09)
+
+Tested against the Debian 13 Cloudbook (Celeron N3050 / Intel Braswell i965)
+over SSH and the Windows desktop:
+
+- LAN discovery found the receiver with Receiver host set to auto.
+- Receiver exit disabled the virtual adapter (PnP problem code 22); reconnect
+  enabled it again (code 0). Cooperative Stop also removed it and ended the task.
+- VA-API displayed actual desktop frames without the software override. Direct
+  mapping works where this driver rejects normal frame download. The mapped
+  memory uses FFmpeg's optimized uncached-memory copy.
+- Calibrated the installed host to 1366x768, 30 fps and 4M bitrate. At 12M the
+  laptop could not sustain the requested stream over this Wi-Fi connection.
+- Fixed Windows CRT text translation corrupting binary PCM, enabled immediate
+  FFmpeg audio output, and increased the Linux prebuffer to absorb measured
+  bursts. Recorded a 440 Hz test tone from the Cloudbook's PipeWire sink monitor.
+- The final eight-second tone recording contained no silent 100 ms windows;
+  occasional audio buffer corrections still occurred during sustained streaming.
+- All 16 Linux/host checks, the Windows PCM byte-preservation check, and the
+  PowerShell discovery/display lifecycle checks passed; the launcher compiled.
+
+The speaker output remained muted during digital recording. Physical speaker
+quality, input latency and long-duration Wi-Fi roaming have not been verified.
+The audio queue starts at 240 ms and is capped at 480 ms, favoring continuity.

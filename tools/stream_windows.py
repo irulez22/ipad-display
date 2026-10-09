@@ -808,6 +808,7 @@ def _audio_loop(host, port, helper_path, ffmpeg_path, stats, resources):
         "-ar", "48000",
         "-ac", "2",
         "-f", "s16le",
+        "-flush_packets", "1",
         "pipe:1",
     ]
     try:
@@ -1075,7 +1076,7 @@ def main():
             "protocol": PROTOCOL_VERSION,
             "host": "windows",
             "session_id": session_id,
-            "session_mode": "thin_client" if args.transport == "Windows" else "display",
+            "session_mode": "thin_client" if args.transport in ("Windows", "Linux") else "display",
             "audio_pcm_v2": True,
             "audio_port": args.audio_port,
             "width": width_i,

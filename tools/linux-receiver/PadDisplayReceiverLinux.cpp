@@ -47,13 +47,13 @@ static std::mutex video_mtx;
 static std::condition_variable video_cv;
 static std::deque<std::vector<uint8_t>> video_q;
 static constexpr size_t VIDEO_Q_MAX=8;
-static constexpr size_t AUDIO_MAX=48000*4*120/1000;
-static constexpr size_t AUDIO_START_BYTES=48000*4*40/1000;
+static constexpr size_t AUDIO_MAX=48000*4*480/1000;
+static constexpr size_t AUDIO_START_BYTES=48000*4*240/1000;
 static std::atomic<bool> audio_playing{false};
 static std::atomic<uint64_t> video_packets{0}, video_bytes{0}, decoded_frames{0}, frames{0};
 static std::atomic<uint64_t> frame_fingerprint{0};
 static std::atomic<uint64_t> frame_change_ppm{0};
-static std::atomic<uint64_t> audio_packets{0}, audio_underruns{0};
+static std::atomic<uint64_t> audio_packets{0}, audio_underruns{0}, audio_overflows{0};
 
 static SDL_Window* window_=nullptr;
 static SDL_GLContext gl_context=nullptr;
@@ -133,6 +133,39 @@ static int Listen(uint16_t port) {
     if(bind(fd,(sockaddr*)&a,sizeof(a))<0 || listen(fd,2)<0){close(fd);return -1;}
     return fd;
 }
+static std::string DiscoveryReply(const std::string& request){
+    const std::string prefix="PADDISPLAY_DISCOVER_V1 ";
+    if(request.size()!=prefix.size()+32 || request.compare(0,prefix.size(),prefix)!=0) return {};
+    const std::string nonce=request.substr(prefix.size());
+    if(nonce.find_first_not_of("0123456789abcdef")!=std::string::npos) return {};
+    char hostname[256]{};
+    if(gethostname(hostname,sizeof(hostname)-1)!=0) return {};
+    std::string name=hostname;
+    for(char& c:name) if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||
+                          (c>='0'&&c<='9')||c=='-'||c=='_'||c=='.')) c='_';
+    return "PADDISPLAY_RECEIVER_V1 "+nonce+" "+name+" 4822 4824";
+}
+
+static void DiscoveryThread(){
+    int fd=socket(AF_INET,SOCK_DGRAM,0);
+    if(fd<0){Log("discovery socket failed");return;}
+    sockaddr_in address{};address.sin_family=AF_INET;
+    address.sin_addr.s_addr=htonl(INADDR_ANY);address.sin_port=htons(4821);
+    if(bind(fd,(sockaddr*)&address,sizeof(address))<0){
+        Log("discovery UDP 4821 unavailable");close(fd);return;
+    }
+    while(running){
+        fd_set set;FD_ZERO(&set);FD_SET(fd,&set);timeval timeout{1,0};
+        if(select(fd+1,&set,nullptr,nullptr,&timeout)<=0) continue;
+        char request[128];sockaddr_in peer{};socklen_t size=sizeof(peer);
+        ssize_t count=recvfrom(fd,request,sizeof(request),0,(sockaddr*)&peer,&size);
+        if(count<=0) continue;
+        std::string reply=DiscoveryReply(std::string(request,(size_t)count));
+        if(!reply.empty()) sendto(fd,reply.data(),reply.size(),0,(sockaddr*)&peer,size);
+    }
+    close(fd);
+}
+
 static AVPixelFormat GetHwFormat(AVCodecContext*,const AVPixelFormat* fmts){
     for(auto p=fmts;*p!=AV_PIX_FMT_NONE;++p) if(*p==hw_fmt) return *p;
     return fmts[0];
@@ -232,7 +265,7 @@ static void CopyPlane(std::vector<uint8_t>& dst,const uint8_t* src,int stride,in
 struct Decoder {
     AVCodecContext* ctx=nullptr;
     AVCodecParserContext* parser=nullptr;
-    AVFrame *frame=nullptr,*sw=nullptr;
+    AVFrame *frame=nullptr,*sw=nullptr,*cached=nullptr;
     AVPacket* pkt=nullptr;
     SwsContext* sws=nullptr;
     bool hw=false;
@@ -243,8 +276,8 @@ struct Decoder {
         if(!codec) return false;
         ctx=avcodec_alloc_context3(codec);
         parser=av_parser_init(AV_CODEC_ID_H264);
-        frame=av_frame_alloc(); sw=av_frame_alloc(); pkt=av_packet_alloc();
-        if(!ctx||!parser||!frame||!sw||!pkt) return false;
+        frame=av_frame_alloc(); sw=av_frame_alloc(); cached=av_frame_alloc(); pkt=av_packet_alloc();
+        if(!ctx||!parser||!frame||!sw||!cached||!pkt) return false;
         const char* disable_vaapi=getenv("PADDISPLAY_DISABLE_VAAPI");
         bool allow_hw=!(disable_vaapi && std::string(disable_vaapi)!="0");
         if(!allow_hw) Log("decoder: VA-API disabled by PADDISPLAY_DISABLE_VAAPI");
@@ -268,7 +301,7 @@ struct Decoder {
     }
     ~Decoder(){
         if(sws) sws_freeContext(sws);
-        av_packet_free(&pkt); av_frame_free(&sw); av_frame_free(&frame);
+        av_packet_free(&pkt); av_frame_free(&cached); av_frame_free(&sw); av_frame_free(&frame);
         if(parser) av_parser_close(parser);
         avcodec_free_context(&ctx);
     }
@@ -287,8 +320,30 @@ struct Decoder {
         AVFrame* use=src;
         if(src->format==hw_fmt){
             av_frame_unref(sw);
-            if(av_hwframe_transfer_data(sw,src,0)<0) return;
-            use=sw;
+            if(av_hwframe_map(sw,src,AV_HWFRAME_MAP_READ|AV_HWFRAME_MAP_DIRECT)<0){
+                av_frame_unref(sw);
+                if(av_hwframe_transfer_data(sw,src,0)<0){
+                    Log("VA-API readback failed; use software decoding on this driver");
+                    return;
+                }
+            } else {
+                // Direct VA mappings are uncached; use FFmpeg's optimized GPU-memory copy.
+                if(cached->format!=sw->format || cached->width!=sw->width || cached->height!=sw->height){
+                    av_frame_unref(cached);
+                    cached->format=sw->format; cached->width=sw->width; cached->height=sw->height;
+                    if(av_frame_get_buffer(cached,64)<0) return;
+                }
+                if(av_frame_make_writable(cached)<0) return;
+                ptrdiff_t dst_stride[4],src_stride[4];
+                const uint8_t* source[4];
+                for(int i=0;i<4;++i){
+                    dst_stride[i]=cached->linesize[i]; src_stride[i]=sw->linesize[i]; source[i]=sw->data[i];
+                }
+                av_image_copy_uc_from(cached->data,dst_stride,source,src_stride,
+                                      (AVPixelFormat)sw->format,sw->width,sw->height);
+                use=cached;
+            }
+            if(use==src) use=sw;
         }
 
         const int w=use->width, h=use->height;
@@ -428,6 +483,7 @@ static void QueuePCM(const uint8_t* out_data,int out_bytes){
         SDL_ClearQueuedAudio(audio_dev);
         audio_playing=false;
         ++audio_underruns;
+        ++audio_overflows;
         queued=0;
     }
 
@@ -900,7 +956,7 @@ int main(){
     } else {
         Log(std::string("audio open failed: ")+SDL_GetError());
     }
-    std::thread aud(AudioThread),net(NetworkThread),dec(DecodeThread);
+    std::thread aud(AudioThread),net(NetworkThread),dec(DecodeThread),discovery(DiscoveryThread);
     auto last=std::chrono::steady_clock::now();
     uint64_t last_decoded=0, last_presented=0;
     bool last_connected=false;
@@ -977,7 +1033,8 @@ int main(){
                 " frame_change_ppm="+std::to_string(frame_change_ppm.load())+
                 " audio_packets="+std::to_string(audio_packets.load())+
                 " audio_queued="+std::to_string(audio_dev?SDL_GetQueuedAudioSize(audio_dev):0)+
-                " audio_resets="+std::to_string(audio_underruns.load()));
+                " audio_resets="+std::to_string(audio_underruns.load())+
+                " audio_overflows="+std::to_string(audio_overflows.load()));
             last_decoded=decoded_now;
             last_presented=presented_now;
             last=now;
@@ -985,7 +1042,7 @@ int main(){
     }
     if(client_fd>=0) shutdown(client_fd,SHUT_RDWR);
     video_cv.notify_all();
-    net.join(); dec.join(); aud.join();
+    net.join(); dec.join(); aud.join(); discovery.join();
     if(audio_stream){ SDL_FreeAudioStream(audio_stream); audio_stream=nullptr; }
     if(audio_dev) SDL_CloseAudioDevice(audio_dev);
     if(gl_yuv_textures[0]) glDeleteTextures(3,gl_yuv_textures);

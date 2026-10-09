@@ -15,6 +15,9 @@ if [ ! -d "$HERE" ]; then
 fi
 
 cd "$HERE" || exit 1
-pkill -f paddisplay-receiver >/dev/null 2>&1 || true
-export PADDISPLAY_DISABLE_VAAPI=1
+pkill -f "$HERE/bin/paddisplay-receiver" >/dev/null 2>&1 || true
+for attempt in 1 2 3 4 5; do
+  pgrep -f "$HERE/bin/paddisplay-receiver" >/dev/null || break
+  sleep 1
+done
 exec /bin/sh "$HERE/run.sh"
