@@ -18,6 +18,7 @@ extern "C" {
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -473,8 +474,26 @@ static uint16_t Norm(int v,int maxv){
     return (uint16_t)((uint64_t)v*65535/(uint64_t)(maxv-1));
 }
 static void SendMouse(uint8_t action,uint8_t button,int x,int y,int wheel){
-    int w=1,h=1; SDL_GetWindowSize(window_,&w,&h);
-    uint16_t nx=Norm(x,w),ny=Norm(y,h);
+    int w=1,h=1;
+    SDL_GetWindowSize(window_,&w,&h);
+
+    int content_x=0,content_y=0,content_w=w,content_h=h;
+    if(stream_w>0 && stream_h>0 && w>0 && h>0){
+        const double src_aspect=(double)stream_w/(double)stream_h;
+        const double dst_aspect=(double)w/(double)h;
+        if(dst_aspect>src_aspect){
+            content_w=std::max(1,(int)std::lround((double)h*src_aspect));
+            content_x=(w-content_w)/2;
+        } else if(dst_aspect<src_aspect){
+            content_h=std::max(1,(int)std::lround((double)w/src_aspect));
+            content_y=(h-content_h)/2;
+        }
+    }
+
+    int mapped_x=std::max(0,std::min(content_w-1,x-content_x));
+    int mapped_y=std::max(0,std::min(content_h-1,y-content_y));
+    uint16_t nx=Norm(mapped_x,content_w),ny=Norm(mapped_y,content_h);
+
     int16_t wd=(int16_t)std::max(-32768,std::min(32767,wheel));
     uint16_t uw=(uint16_t)wd;
     uint8_t p[8]={action,button,uint8_t(nx>>8),uint8_t(nx),uint8_t(ny>>8),uint8_t(ny),uint8_t(uw>>8),uint8_t(uw)};
