@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -33,9 +34,13 @@ class PadDisplayLauncher : Form
     const string TaskName = "PadDisplay Engine";
     const string TaskSetup = @"\\wsl$\Ubuntu\home\josh\ipad-display\tools\install_windows_engine_task.ps1";
 
+    [DllImport("user32.dll")]
+    static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+
     [STAThread]
     static void Main(string[] args)
     {
+        try { SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new PadDisplayLauncher(Array.Exists(args, x => x == "--autostart")));
