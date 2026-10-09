@@ -81,7 +81,7 @@ static void PDAudioQueueCallback(void *userData, AudioQueueRef queue, AudioQueue
 
 - (void)enqueuePCM:(NSData *)data sequence:(uint32_t)sequence timestampUS:(uint64_t)timestampUS
 {
-    if (!data.length) return;
+    if (!data.length || data.length % 4 != 0) return;
     [self ensureQueue];
     if (!self.queue) return;
 
@@ -113,16 +113,17 @@ static void PDAudioQueueCallback(void *userData, AudioQueueRef queue, AudioQueue
 
     memcpy(buffer->mAudioData, data.bytes, data.length);
     buffer->mAudioDataByteSize = (UInt32)data.length;
+    @synchronized (self) { self.queuedBuffers++; }
     s = AudioQueueEnqueueBuffer(self.queue, buffer, 0, NULL);
     if (s != noErr) {
         PDLog(@"AudioQueueEnqueueBuffer failed status=%d", (int)s);
+        @synchronized (self) { self.queuedBuffers--; }
         AudioQueueFreeBuffer(self.queue, buffer);
         return;
     }
 
     @synchronized (self) {
         self.packetCount++;
-        self.queuedBuffers++;
 
         if (!self.started && self.queuedBuffers >= self.targetPrebuffer) {
             s = AudioQueueStart(self.queue, NULL);

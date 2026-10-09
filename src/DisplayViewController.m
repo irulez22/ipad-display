@@ -161,12 +161,11 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
         self.telemetryTimer = nil;
     });
     self.videoReady = NO;
-    [self.touchIDs removeAllObjects];
+    dispatch_async(dispatch_get_main_queue(), ^{ [self.touchIDs removeAllObjects]; });
     [self.parser flush];
     [self.decoder flush];
     [self.decoder reset];
-    [self.audioPlayer reset];
-    self.audioPlayer = nil;
+    [self.audioReceiver disconnectClient];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         self.statusLabel.hidden = NO;
@@ -176,6 +175,9 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
 
 - (void)streamReceiver:(PDStreamReceiver *)receiver didReceivePacketType:(uint8_t)type payload:(NSData *)payload
 {
+    if (receiver == self.audioReceiver && type == 0x01) return;
+    if (receiver != self.audioReceiver &&
+        (type == PD_PACKET_AUDIO_PCM || type == PD_PACKET_AUDIO_PCM_V2)) return;
     if (type == 0x01) {
         [self.parser appendData:payload];
     } else if (type == PD_PACKET_CONFIG) {
@@ -254,7 +256,10 @@ static const NSUInteger PD_MAX_TOUCHES = 10;
     if (existing) return (uint16_t)[existing unsignedIntValue];
     if (!create || self.touchIDs.count >= PD_MAX_TOUCHES) return UINT16_MAX;
 
-    uint16_t candidate = self.nextTouchID++;
+    uint16_t candidate;
+    do {
+        candidate = self.nextTouchID++;
+    } while (candidate == UINT16_MAX || [[self.touchIDs allValues] containsObject:@(candidate)]);
     self.touchIDs[key] = @(candidate);
     return candidate;
 }

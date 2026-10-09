@@ -27,6 +27,7 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <deque>
 #include <fstream>
 #include <mutex>
@@ -97,7 +98,12 @@ static void Log(const std::string& s) {
 static bool ReadExact(int fd, void* out, size_t n) {
     auto* p=static_cast<uint8_t*>(out); size_t off=0;
     while(off<n && running) {
+        fd_set set; FD_ZERO(&set); FD_SET(fd,&set); timeval tv{1,0};
+        int ready=select(fd+1,&set,nullptr,nullptr,&tv);
+        if(ready<0){ if(errno==EINTR) continue; return false; }
+        if(!ready) continue;
         ssize_t r=recv(fd,p+off,n-off,0);
+        if(r<0 && errno==EINTR) continue;
         if(r<=0) return false;
         off+=(size_t)r;
     }
@@ -107,6 +113,7 @@ static bool SendAll(int fd,const uint8_t* p,size_t n) {
     size_t off=0;
     while(off<n) {
         ssize_t w=send(fd,p+off,n-off,MSG_NOSIGNAL);
+        if(w<0 && errno==EINTR) continue;
         if(w<=0) return false;
         off+=(size_t)w;
     }
@@ -265,6 +272,16 @@ struct Decoder {
         if(parser) av_parser_close(parser);
         avcodec_free_context(&ctx);
     }
+    bool Reset(){
+        AVCodecParserContext* fresh=av_parser_init(AV_CODEC_ID_H264);
+        if(!fresh) return false;
+        av_parser_close(parser); parser=fresh;
+        avcodec_flush_buffers(ctx);
+        prev_samples.clear();
+        std::lock_guard<std::mutex> lock(pending_frame_mtx);
+        pending_frame=PendingVideoFrame{};
+        return true;
+    }
     void Present(AVFrame* src){
         ++decoded_frames;
         AVFrame* use=src;
@@ -349,7 +366,7 @@ struct Decoder {
         while(bytes){
             uint8_t* out=nullptr; int out_n=0;
             int used=av_parser_parse2(parser,ctx,&out,&out_n,data,(int)bytes,AV_NOPTS_VALUE,AV_NOPTS_VALUE,0);
-            if(used<0) return;
+            if(used<0 || (used==0 && out_n==0)) return;
             data+=used; bytes-=used;
             if(!out_n) continue;
             av_packet_unref(pkt); pkt->data=out; pkt->size=out_n;
@@ -371,7 +388,14 @@ static void DecodeThread(){
             chunk=std::move(video_q.front()); video_q.pop_front();
         }
         video_cv.notify_all();
-        d.Feed(chunk.data(),chunk.size());
+        if(chunk.empty()){
+            if(!d.Reset()){Log("decoder reset failed");running=false;video_cv.notify_all();return;}
+            continue;
+        }
+        const size_t bytes=chunk.size();
+        // FFmpeg bitstream readers require zero padding beyond the input.
+        chunk.resize(bytes+AV_INPUT_BUFFER_PADDING_SIZE,0);
+        d.Feed(chunk.data(),bytes);
     }
 }
 static void ResetAudioPlayback(){
@@ -392,6 +416,38 @@ static SDL_AudioFormat AudioFormatFromWire(uint8_t code){
     }
 }
 
+static void QueuePCM(const uint8_t* out_data,int out_bytes){
+    Uint32 queued=SDL_GetQueuedAudioSize(audio_dev);
+    if(audio_playing && queued==0){
+        SDL_PauseAudioDevice(audio_dev,1);
+        audio_playing=false;
+        ++audio_underruns;
+    }
+    if(queued+(uint64_t)out_bytes>AUDIO_MAX){
+        SDL_PauseAudioDevice(audio_dev,1);
+        SDL_ClearQueuedAudio(audio_dev);
+        audio_playing=false;
+        ++audio_underruns;
+        queued=0;
+    }
+
+    if((size_t)out_bytes>AUDIO_MAX){
+        out_data+=out_bytes-AUDIO_MAX;
+        out_bytes=(int)AUDIO_MAX;
+    }
+    if(SDL_QueueAudio(audio_dev,out_data,(Uint32)out_bytes)!=0){
+        Log(std::string("SDL_QueueAudio failed: ")+SDL_GetError());
+        return;
+    }
+
+    ++audio_packets;
+    queued=SDL_GetQueuedAudioSize(audio_dev);
+    if(!audio_playing.load() && queued>=AUDIO_START_BYTES){
+        SDL_PauseAudioDevice(audio_dev,0);
+        audio_playing=true;
+    }
+}
+
 static void AudioThread(){
     int listener=Listen(4824);
     if(listener<0){Log("audio listen failed");return;}
@@ -405,7 +461,8 @@ static void AudioThread(){
 
         ResetAudioPlayback();
         if(audio_stream){ SDL_FreeAudioStream(audio_stream); audio_stream=nullptr; }
-        bool audio_direct=false;
+        bool audio_direct=true;
+        uint16_t source_align=4;
         Log("audio connected");
 
         while(running){
@@ -416,6 +473,7 @@ static void AudioThread(){
             std::vector<uint8_t> p(n);
             if(n&&!ReadExact(fd,p.data(),n)) break;
 
+            if(h[4]==DISCONNECT) break;
             if(h[4]==AUDIO_FORMAT){
                 if(n!=8){
                     Log("audio format packet invalid length");
@@ -426,12 +484,15 @@ static void AudioThread(){
                 uint8_t format_code=p[5];
                 uint16_t block_align=(uint16_t(p[6])<<8)|p[7];
                 SDL_AudioFormat src_format=AudioFormatFromWire(format_code);
-                if(!src_format || rate==0 || channels==0 || block_align==0){
+                if(!src_format || rate<8000 || rate>384000 || channels==0 || channels>32 ||
+                   block_align!=channels*(SDL_AUDIO_BITSIZE(src_format)/8)){
                     Log("audio format packet unsupported");
                     continue;
                 }
 
+                ResetAudioPlayback();
                 if(audio_stream){ SDL_FreeAudioStream(audio_stream); audio_stream=nullptr; }
+                source_align=block_align;
                 audio_direct=(src_format==AUDIO_S16LSB && channels==2 && rate==48000 && block_align==4);
                 if(!audio_direct){
                     audio_stream=SDL_NewAudioStream(
@@ -457,7 +518,7 @@ static void AudioThread(){
             else continue;
 
             size_t usable=p.size()-off;
-            if(!usable || !audio_dev || (!audio_direct && !audio_stream)) continue;
+            if(!usable || usable%source_align || !audio_dev || (!audio_direct && !audio_stream)) continue;
 
             std::vector<uint8_t> converted;
             const uint8_t* out_data=nullptr;
@@ -492,25 +553,7 @@ static void AudioThread(){
                 out_bytes=got;
             }
 
-            Uint32 queued=SDL_GetQueuedAudioSize(audio_dev);
-            if(queued>AUDIO_MAX){
-                SDL_ClearQueuedAudio(audio_dev);
-                audio_playing=false;
-                ++audio_underruns;
-                queued=0;
-            }
-
-            if(SDL_QueueAudio(audio_dev,out_data,(Uint32)out_bytes)!=0){
-                Log(std::string("SDL_QueueAudio failed: ")+SDL_GetError());
-                continue;
-            }
-
-            ++audio_packets;
-            queued=SDL_GetQueuedAudioSize(audio_dev);
-            if(!audio_playing.load() && queued>=AUDIO_START_BYTES){
-                SDL_PauseAudioDevice(audio_dev,0);
-                audio_playing=true;
-            }
+            QueuePCM(out_data,out_bytes);
         }
 
         ResetAudioPlayback();
@@ -532,6 +575,12 @@ static void NetworkThread(){
         if(fd<0) continue;
         int one=1; setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof(one));
         {std::lock_guard<std::mutex> lock(send_mtx);client_fd=fd;}
+        {
+            std::lock_guard<std::mutex> lock(video_mtx);
+            video_q.clear();
+            video_q.emplace_back(); // Empty entry resets the decoder before the new stream.
+        }
+        video_cv.notify_all();
         connected=true;
         const std::string hello="{\"protocol\":1,\"client\":\"linux\",\"session_mode\":\"thin_client\","
             "\"video\":\"h264\",\"audio_pcm_v2\":true,\"audio_port\":4824,"
@@ -544,7 +593,7 @@ static void NetworkThread(){
             if(n>8*1024*1024) break;
             std::vector<uint8_t> p(n); if(n&&!ReadExact(fd,p.data(),n)) break;
             if(h[4]==DISCONNECT) break;
-            if(h[4]==VIDEO_H264){
+            if(h[4]==VIDEO_H264 && n){
                 std::unique_lock<std::mutex> lock(video_mtx);
                 video_cv.wait(lock,[]{return !running||video_q.size()<VIDEO_Q_MAX;});
                 if(!running) break;
@@ -665,8 +714,26 @@ static uint16_t WinVk(SDL_Keycode k){
         case SDLK_UP:return 0x26; case SDLK_RIGHT:return 0x27; case SDLK_DOWN:return 0x28;
         case SDLK_DELETE:return 0x2E; case SDLK_HOME:return 0x24; case SDLK_END:return 0x23;
         case SDLK_PAGEUP:return 0x21; case SDLK_PAGEDOWN:return 0x22;
-        case SDLK_LSHIFT:case SDLK_RSHIFT:return 0x10; case SDLK_LCTRL:case SDLK_RCTRL:return 0x11;
-        case SDLK_LALT:case SDLK_RALT:return 0x12; case SDLK_LGUI:case SDLK_RGUI:return 0x5B;
+        case SDLK_LSHIFT:return 0xA0; case SDLK_RSHIFT:return 0xA1;
+        case SDLK_LCTRL:return 0xA2; case SDLK_RCTRL:return 0xA3;
+        case SDLK_LALT:return 0xA4; case SDLK_RALT:return 0xA5;
+        case SDLK_LGUI:return 0x5B; case SDLK_RGUI:return 0x5C;
+        case SDLK_INSERT:return 0x2D; case SDLK_CAPSLOCK:return 0x14;
+        case SDLK_NUMLOCKCLEAR:return 0x90; case SDLK_SCROLLLOCK:return 0x91;
+        case SDLK_PRINTSCREEN:return 0x2C; case SDLK_PAUSE:return 0x13;
+        case SDLK_SEMICOLON:return 0xBA; case SDLK_EQUALS:return 0xBB;
+        case SDLK_COMMA:return 0xBC; case SDLK_MINUS:return 0xBD;
+        case SDLK_PERIOD:return 0xBE; case SDLK_SLASH:return 0xBF;
+        case SDLK_BACKQUOTE:return 0xC0; case SDLK_LEFTBRACKET:return 0xDB;
+        case SDLK_BACKSLASH:return 0xDC; case SDLK_RIGHTBRACKET:return 0xDD;
+        case SDLK_QUOTE:return 0xDE;
+        case SDLK_KP_0:return 0x60; case SDLK_KP_1:return 0x61; case SDLK_KP_2:return 0x62;
+        case SDLK_KP_3:return 0x63; case SDLK_KP_4:return 0x64; case SDLK_KP_5:return 0x65;
+        case SDLK_KP_6:return 0x66; case SDLK_KP_7:return 0x67; case SDLK_KP_8:return 0x68;
+        case SDLK_KP_9:return 0x69; case SDLK_KP_MULTIPLY:return 0x6A;
+        case SDLK_KP_PLUS:return 0x6B; case SDLK_KP_MINUS:return 0x6D;
+        case SDLK_KP_PERIOD:return 0x6E; case SDLK_KP_DIVIDE:return 0x6F;
+        case SDLK_KP_ENTER:return 0x0D;
         case SDLK_F1:return 0x70;case SDLK_F2:return 0x71;case SDLK_F3:return 0x72;case SDLK_F4:return 0x73;
         case SDLK_F5:return 0x74;case SDLK_F6:return 0x75;case SDLK_F7:return 0x76;case SDLK_F8:return 0x77;
         case SDLK_F9:return 0x78;case SDLK_F10:return 0x79;case SDLK_F11:return 0x7A;case SDLK_F12:return 0x7B;
@@ -675,8 +742,14 @@ static uint16_t WinVk(SDL_Keycode k){
 }
 static void SendKey(const SDL_KeyboardEvent& e,bool up){
     uint16_t vk=WinVk(e.keysym.sym); if(!vk) return;
-    uint16_t sc=(uint16_t)e.keysym.scancode;
-    uint8_t p[6]={uint8_t(up?1:0),uint8_t(vk>>8),uint8_t(vk),uint8_t(sc>>8),uint8_t(sc),0};
+    // SDL scancodes are USB usages, not Windows scan codes; use the VK fallback.
+    const SDL_Keycode key=e.keysym.sym;
+    uint8_t extended=key==SDLK_RCTRL || key==SDLK_RALT || key==SDLK_LGUI ||
+        key==SDLK_RGUI || key==SDLK_LEFT || key==SDLK_RIGHT || key==SDLK_UP ||
+        key==SDLK_DOWN || key==SDLK_HOME || key==SDLK_END || key==SDLK_PAGEUP ||
+        key==SDLK_PAGEDOWN || key==SDLK_INSERT || key==SDLK_DELETE ||
+        key==SDLK_KP_ENTER || key==SDLK_KP_DIVIDE;
+    uint8_t p[6]={uint8_t(up?1:0),uint8_t(vk>>8),uint8_t(vk),0,0,extended};
     SendPacket(KEYBOARD_V1,p,sizeof(p));
 }
 

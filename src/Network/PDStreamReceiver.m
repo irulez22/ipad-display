@@ -4,6 +4,7 @@
 #import <netinet/in.h>
 #import <netinet/tcp.h>
 #import <unistd.h>
+#import <errno.h>
 
 static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
 
@@ -33,6 +34,7 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
     size_t left = length;
     while (left) {
         ssize_t count = recv(fd, p, left, 0);
+        if (count < 0 && errno == EINTR) continue;
         if (count <= 0) return NO;
         p += count;
         left -= (size_t)count;
@@ -46,6 +48,7 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
     size_t left = length;
     while (left) {
         ssize_t count = send(fd, p, left, 0);
+        if (count < 0 && errno == EINTR) continue;
         if (count <= 0) return NO;
         p += count;
         left -= (size_t)count;
@@ -57,7 +60,7 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
 {
     @synchronized (self) {
         int fd = self.clientFD;
-        if (fd < 0) return NO;
+        if (fd < 0 || payload.length > PDMaximumPayload) return NO;
 
         uint32_t length = (uint32_t)payload.length;
         uint32_t networkLength = htonl(length);
@@ -65,8 +68,11 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
         memcpy(header, &networkLength, 4);
         header[4] = type;
 
-        if (![self sendExactly:header length:sizeof(header) fd:fd]) return NO;
-        if (length && ![self sendExactly:payload.bytes length:length fd:fd]) return NO;
+        if (![self sendExactly:header length:sizeof(header) fd:fd] ||
+            (length && ![self sendExactly:payload.bytes length:length fd:fd])) {
+            [self disconnectClient];
+            return NO;
+        }
         return YES;
     }
 }
@@ -110,7 +116,9 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
         setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
         setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-        self.clientFD = client;
+        struct timeval sendTimeout = {0, 250000};
+        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
+        @synchronized (self) { self.clientFD = client; }
         PDLog(@"Receiver accepted client fd=%d", client);
         id<PDStreamReceiverDelegate> delegate = self.delegate;
         [delegate streamReceiverDidConnect:self];
@@ -131,9 +139,11 @@ static const uint32_t PDMaximumPayload = 8 * 1024 * 1024;
             }
         }
 
-        shutdown(client, SHUT_RDWR);
-        close(client);
-        if (self.clientFD == client) self.clientFD = -1;
+        @synchronized (self) {
+            if (self.clientFD == client) self.clientFD = -1;
+            shutdown(client, SHUT_RDWR);
+            close(client);
+        }
         PDLog(@"Receiver client fd=%d disconnected", client);
         [delegate streamReceiverDidDisconnect:self error:nil];
     }

@@ -202,12 +202,18 @@ static std::wstring Utf8ToWide(const std::string& s) {
 static bool ReadExact(SOCKET s, void* dst, int bytes) {
     char* p = static_cast<char*>(dst);
     int got = 0;
-    while (got < bytes) {
+    while (got < bytes && g_running) {
+        fd_set set{};
+        FD_ZERO(&set); FD_SET(s, &set);
+        timeval timeout{1, 0};
+        int ready = select(0, &set, nullptr, nullptr, &timeout);
+        if (ready == SOCKET_ERROR) return false;
+        if (!ready) continue;
         int n = recv(s, p + got, bytes - got, 0);
         if (n <= 0) return false;
         got += n;
     }
-    return true;
+    return got == bytes;
 }
 
 static bool SendPacket(uint8_t type, const uint8_t* payload, uint32_t len) {
@@ -1197,8 +1203,14 @@ static void NetworkThread() {
         return;
     }
 
+    PostMessage(g_hwnd, WM_APP_STATUS, 0, (LPARAM)_wcsdup(L"Waiting for host connection\nTCP 4822"));
     while (g_running) {
-        PostMessage(g_hwnd, WM_APP_STATUS, 0, (LPARAM)_wcsdup(L"Waiting for host connection\nTCP 4822"));
+        fd_set set{};
+        FD_ZERO(&set); FD_SET(listenSock, &set);
+        timeval timeout{1, 0};
+        int ready = select(0, &set, nullptr, nullptr, &timeout);
+        if (!g_running || ready == SOCKET_ERROR) break;
+        if (!ready) continue;
         SOCKET s = accept(listenSock, nullptr, nullptr);
         if (s == INVALID_SOCKET) break;
 

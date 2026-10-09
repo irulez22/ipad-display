@@ -16,8 +16,9 @@ Each frame contains a 4-byte unsigned big-endian payload length, a 1-byte packet
 | 0x13 | KEYBOARD_V1 | Windows laptop receiver -> Windows host | action (u8: 0 down, 1 up), virtual-key (u16 BE), scan code (u16 BE), flags (u8; bit 0 extended-key). |
 | 0x20 | AUDIO_PCM | Windows -> iPad (TCP 4824) | Legacy 48 kHz stereo signed 16-bit LE PCM. |
 | 0x21 | AUDIO_PCM_V2 | Windows -> iPad (TCP 4824) | sequence (u32 BE), monotonic timestamp µs (u64 BE), then 48 kHz stereo signed 16-bit LE PCM. |
+| 0x22 | AUDIO_FORMAT | Windows -> Linux (TCP 4824) | sample rate (u32 BE), channels (u8), sample format (u8: 1=s16, 3=s32, 4=f32), block alignment (u16 BE). Current host sends 48000 Hz, 2 channels, s16, alignment 4. |
 
-The parser reconstructs NAL units across network packet boundaries. SPS (NAL 7) and PPS (NAL 8) must precede picture data. Send regular IDR frames.
+The parser reconstructs NAL units across network packet boundaries. Send access-unit delimiters (NAL 9) between pictures; the iPad and Windows receiver use them to assemble frames. Host packets are limited to 8 MiB. SPS (NAL 7) and PPS (NAL 8) must precede picture data. Send regular IDR frames.
 
 Touch phases are 0=down, 1=move, 2=up, 3=cancel. X and Y are normalized to 0...65535 across the displayed iPad surface.
 

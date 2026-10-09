@@ -2,6 +2,7 @@
 """Capture the Windows desktop with FFmpeg and stream H.264 to PadDisplay."""
 import argparse
 import json
+from contextlib import ExitStack
 import os
 import ctypes
 from ctypes import wintypes
@@ -28,6 +29,7 @@ KEYBOARD_V1 = 0x13
 PORT = 4822
 AUDIO_PORT = 4824
 MAX_TOUCH_CONTACTS = 10
+MAX_PAYLOAD = 8 * 1024 * 1024
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 
@@ -92,7 +94,7 @@ class StreamStats:
 
     def set_ipad_hello(self, hello):
         with self.lock:
-            self.ipad_hello = dict(hello or {})
+            self.ipad_hello.update(hello or {})
 
     def snapshot(self):
         with self.lock:
@@ -127,10 +129,14 @@ def watchdog_loop(stats, proc, stop_event, stall_seconds=5.0):
 def status_loop(stats, stop_event, status_file=None, transport="unknown", host="unknown"):
     last_video = 0
     last_audio = 0
+    last_sample = time.monotonic()
     while not stop_event.wait(1.0):
         video, audio, touches, started, last_video_time, last_audio_time, ipad_hello = stats.snapshot()
-        video_mbps = (video - last_video) * 8.0 / 1000000.0
-        audio_kbps = (audio - last_audio) * 8.0 / 1000.0
+        sample_time = time.monotonic()
+        interval = max(0.001, sample_time - last_sample)
+        video_mbps = (video - last_video) * 8.0 / 1000000.0 / interval
+        audio_kbps = (audio - last_audio) * 8.0 / 1000.0 / interval
+        last_sample = sample_time
         elapsed = int(time.monotonic() - started)
         now = time.monotonic()
         video_age = "-" if last_video_time is None else "%.1fs" % (now - last_video_time)
@@ -221,6 +227,39 @@ class POINTER_TYPE_INFO(ctypes.Structure):
     ]
 
 
+# SendInput requires the full union size even when sending only a keyboard event.
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_int32), ("dy", ctypes.c_int32),
+        ("mouseData", ctypes.c_uint32), ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32), ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_uint16), ("wScan", ctypes.c_uint16),
+        ("dwFlags", ctypes.c_uint32), ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", ctypes.c_uint32), ("wParamL", ctypes.c_uint16),
+        ("wParamH", ctypes.c_uint16),
+    ]
+
+
+class INPUTUNION(ctypes.Union):
+    _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
+
+
+class INPUT(ctypes.Structure):
+    _anonymous_ = ("u",)
+    _fields_ = [("type", ctypes.c_uint32), ("u", INPUTUNION)]
+
+
 def bitrate_to_bits_per_second(value):
     text = str(value).strip().lower()
     multiplier = 1
@@ -233,7 +272,10 @@ def bitrate_to_bits_per_second(value):
     elif text.endswith("g"):
         multiplier = 1000 * 1000 * 1000
         text = text[:-1]
-    return int(float(text) * multiplier)
+    result = int(float(text) * multiplier)
+    if result <= 0:
+        raise ValueError("bitrate must be positive")
+    return result
 
 
 def one_frame_vbv(bitrate, fps):
@@ -243,6 +285,8 @@ def one_frame_vbv(bitrate, fps):
 
 
 def send_packet(sock, packet_type, payload=b"", lock=None):
+    if len(payload) > MAX_PAYLOAD:
+        raise ValueError("packet exceeds 8 MiB limit")
     frame = struct.pack(">IB", len(payload), packet_type) + payload
     if lock is None:
         sock.sendall(frame)
@@ -252,10 +296,15 @@ def send_packet(sock, packet_type, payload=b"", lock=None):
 
 
 def read_exactly(sock, length):
+    if not 0 <= length <= MAX_PAYLOAD:
+        raise ValueError("packet length must be between 0 and 8 MiB")
     chunks = []
     left = length
     while left:
-        data = sock.recv(left)
+        try:
+            data = sock.recv(left)
+        except socket.timeout:
+            continue
         if not data:
             return None
         chunks.append(data)
@@ -466,11 +515,15 @@ def parse_touch_v2(payload):
         return []
 
     contacts = []
+    seen = set()
     offset = 1
     for _ in range(count):
         contact_id, phase, x_raw, y_raw = struct.unpack(
             ">HBHH", payload[offset : offset + 7]
         )
+        if phase not in (0, 1, 2, 3) or contact_id in seen:
+            return []
+        seen.add(contact_id)
         contacts.append(
             (contact_id, phase, x_raw / 65535.0, y_raw / 65535.0)
         )
@@ -490,6 +543,10 @@ def inject_mouse_packet(payload, monitor_rect):
         return False
 
     action, button, x_raw, y_raw, wheel = struct.unpack(">BBHHh", payload)
+    if action not in (0, 1, 2, 3) or button > 5:
+        return False
+    if action in (1, 2) and button == 0:
+        return False
     x, y = _monitor_point(monitor_rect, x_raw, y_raw)
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -508,23 +565,6 @@ def inject_mouse_packet(payload, monitor_rect):
     MOUSEEVENTF_VIRTUALDESK = 0x4000
     XBUTTON1 = 0x0001
     XBUTTON2 = 0x0002
-
-    class MOUSEINPUT(ctypes.Structure):
-        _fields_ = [
-            ("dx", wintypes.LONG),
-            ("dy", wintypes.LONG),
-            ("mouseData", wintypes.DWORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-        ]
-
-    class INPUTUNION(ctypes.Union):
-        _fields_ = [("mi", MOUSEINPUT)]
-
-    class INPUT(ctypes.Structure):
-        _anonymous_ = ("u",)
-        _fields_ = [("type", wintypes.DWORD), ("u", INPUTUNION)]
 
     vx = user32.GetSystemMetrics(76)
     vy = user32.GetSystemMetrics(77)
@@ -551,7 +591,7 @@ def inject_mouse_packet(payload, monitor_rect):
 
     inp = INPUT()
     inp.type = INPUT_MOUSE
-    inp.mi = MOUSEINPUT(dx, dy, data, flags, 0, None)
+    inp.mi = MOUSEINPUT(dx, dy, data, flags, 0, 0)
     sent = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
     if sent != 1:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -563,29 +603,17 @@ def inject_keyboard_packet(payload):
         return False
 
     action, vk, scan, flags = struct.unpack(">BHHB", payload)
+    if action not in (0, 1) or flags & ~1 or vk > 255 or scan > 255:
+        return False
+    if not vk and not scan:
+        return False
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     INPUT_KEYBOARD = 1
     KEYEVENTF_EXTENDEDKEY = 0x0001
     KEYEVENTF_KEYUP = 0x0002
     KEYEVENTF_SCANCODE = 0x0008
 
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-        ]
-
-    class INPUTUNION(ctypes.Union):
-        _fields_ = [("ki", KEYBDINPUT)]
-
-    class INPUT(ctypes.Structure):
-        _anonymous_ = ("u",)
-        _fields_ = [("type", wintypes.DWORD), ("u", INPUTUNION)]
-
-    dw_flags = KEYEVENTF_SCANCODE
+    dw_flags = KEYEVENTF_SCANCODE if scan else 0
     if flags & 0x01:
         dw_flags |= KEYEVENTF_EXTENDEDKEY
     if action == 1:
@@ -593,7 +621,7 @@ def inject_keyboard_packet(payload):
 
     inp = INPUT()
     inp.type = INPUT_KEYBOARD
-    inp.ki = KEYBDINPUT(vk, scan, dw_flags, 0, None)
+    inp.ki = KEYBDINPUT(0 if scan else vk, scan, dw_flags, 0, 0)
     sent = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
     if sent != 1:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -638,6 +666,8 @@ def input_loop(sock, monitor_rect, stats=None):
             if payload is None:
                 return
 
+            if packet_type == DISCONNECT:
+                return
             if packet_type == CONFIG:
                 try:
                     text = payload.decode("utf-8", "replace")
@@ -674,13 +704,31 @@ def input_loop(sock, monitor_rect, stats=None):
                     touch.inject([(0, phase, x, y)])
                     if stats is not None:
                         stats.add_touch()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return
     except Exception as exc:
         print("Input injection error: %s" % exc)
 
 
 def audio_loop(host, port, helper_path, ffmpeg_path, stats=None):
+    with ExitStack() as resources:
+        _audio_loop(host, port, helper_path, ffmpeg_path, stats, resources)
+
+
+def stop_process(proc):
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        if pipe is not None:
+            pipe.close()
+
+
+def _audio_loop(host, port, helper_path, ffmpeg_path, stats, resources):
     print("Audio: connecting dedicated stream to %s:%d..." % (host, port))
     audio_sock = None
     deadline = time.monotonic() + 5.0
@@ -694,7 +742,8 @@ def audio_loop(host, port, helper_path, ffmpeg_path, stats=None):
     if audio_sock is None:
         print("Audio: dedicated connection failed after retries: %s" % last_error, flush=True)
         return
-    audio_sock.settimeout(None)
+    resources.callback(audio_sock.close)
+    audio_sock.settimeout(5)
     audio_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     hello = ('{"protocol":%d,"host":"windows","channel":"audio","audio_pcm_v2":true}' %
@@ -705,28 +754,25 @@ def audio_loop(host, port, helper_path, ffmpeg_path, stats=None):
         proc = subprocess.Popen(
             [helper_path],
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=None,
             bufsize=0,
         )
     except Exception as exc:
         print("Audio: could not start WASAPI loopback helper: %s" % exc)
         return
 
+    resources.callback(stop_process, proc)
+
     # The helper begins stdout with one ASCII metadata line, then raw native
     # WASAPI mix-format samples.
-    header = proc.stdout.readline()
+    header = proc.stdout.readline(256)
     if not header:
         try:
             proc.wait(timeout=1)
         except Exception:
             pass
-        err = b""
-        try:
-            err = proc.stderr.read()
-        except Exception:
-            pass
-        print("Audio: WASAPI helper exited before format handshake (code %s): %s" %
-              (proc.poll(), err.decode("utf-8", "replace").strip()), flush=True)
+        print("Audio: WASAPI helper exited before format handshake (code %s)." %
+              proc.poll(), flush=True)
         return
 
     try:
@@ -737,9 +783,8 @@ def audio_loop(host, port, helper_path, ffmpeg_path, stats=None):
         channels = int(parts[2])
         format_name = parts[3]
         block_align = int(parts[4])
-        format_codes = {"s16": 1, "s32": 3, "f32": 4}
-        format_code = format_codes[format_name]
-        if sample_rate <= 0 or channels <= 0 or block_align <= 0:
+        sample_bytes = {"s16": 2, "s32": 4, "f32": 4}[format_name]
+        if not 8000 <= sample_rate <= 384000 or not 1 <= channels <= 32 or block_align != channels * sample_bytes:
             raise ValueError("invalid helper format")
     except Exception as exc:
         print("Audio: invalid WASAPI helper format handshake: %s" % exc, flush=True)
@@ -768,7 +813,7 @@ def audio_loop(host, port, helper_path, ffmpeg_path, stats=None):
     try:
         converter = subprocess.Popen(
             convert_cmd,
-            stdin=subprocess.PIPE,
+            stdin=proc.stdout,
             stdout=subprocess.PIPE,
             stderr=None,
             bufsize=0,
@@ -777,23 +822,7 @@ def audio_loop(host, port, helper_path, ffmpeg_path, stats=None):
         print("Audio: could not start FFmpeg audio converter: %s" % exc, flush=True)
         return
 
-    def pump_native_audio():
-        try:
-            while True:
-                data = proc.stdout.read(max(block_align, 16384))
-                if not data:
-                    break
-                converter.stdin.write(data)
-        except (BrokenPipeError, OSError):
-            pass
-        finally:
-            try:
-                converter.stdin.close()
-            except Exception:
-                pass
-
-    pump_thread = threading.Thread(target=pump_native_audio, daemon=True)
-    pump_thread.start()
+    resources.callback(stop_process, converter)
 
     # Tell Linux only about the canonical converted wire format.
     send_packet(
@@ -850,13 +879,6 @@ def audio_loop(host, port, helper_path, ffmpeg_path, stats=None):
             audio_sock.close()
         except OSError:
             pass
-        if proc.poll() is None:
-            proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
 
 
 def main():
@@ -886,9 +908,26 @@ def main():
     if shutil.which(args.ffmpeg) is None and args.ffmpeg == "ffmpeg":
         sys.exit("ffmpeg was not found in PATH.")
 
-    width, height = args.size.lower().split("x", 1)
-    width_i, height_i = int(width), int(height)
-    vbv_bufsize = one_frame_vbv(args.bitrate, args.fps)
+    try:
+        width, height = args.size.lower().split("x", 1)
+        width_i, height_i = int(width), int(height)
+        if width_i <= 0 or height_i <= 0 or width_i % 2 or height_i % 2:
+            raise ValueError("size must contain positive even dimensions (e.g. 1280x960)")
+        if not 1 <= args.fps <= 240:
+            raise ValueError("fps must be between 1 and 240")
+        if not 1 <= args.chunk <= MAX_PAYLOAD:
+            raise ValueError("chunk must be between 1 and 8388608 bytes")
+        if not 1 <= args.port <= 65535 or not 1 <= args.audio_port <= 65535:
+            raise ValueError("ports must be between 1 and 65535")
+        if args.display < 0 or (args.adapter is not None and args.adapter < 0):
+            raise ValueError("display and adapter indices must be nonnegative")
+        touch = (args.touch_left, args.touch_top, args.touch_width, args.touch_height)
+        if any(v is not None for v in touch):
+            if any(v is None for v in touch) or args.touch_width <= 0 or args.touch_height <= 0:
+                raise ValueError("provide all four touch coordinates with positive width and height")
+        vbv_bufsize = one_frame_vbv(args.bitrate, args.fps)
+    except (ValueError, OverflowError) as exc:
+        p.error(str(exc))
 
     if args.capture == "ddagrab":
         capture = []
@@ -901,6 +940,8 @@ def main():
             "-filter_complex",
             "ddagrab=output_idx=%d:framerate=%d:draw_mouse=0" % (args.display, args.fps),
         ]
+        if args.encoder == "x264":
+            capture[-1] += ",hwdownload,format=bgra,scale=%d:%d,format=yuv420p" % (width_i, height_i)
     else:
         vf = "scale=%s:%s:force_original_aspect_ratio=decrease,pad=%s:%s:(ow-iw)/2:(oh-ih)/2" % (
             width,
@@ -1024,10 +1065,10 @@ def main():
         sock = socket.create_connection((args.host, args.port), timeout=5)
     except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError, TimeoutError, OSError) as exc:
         print("Connect failed: %s" % exc)
-        return
+        return 1
 
     with sock:
-        sock.settimeout(None)
+        sock.settimeout(5)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         hello = json.dumps({
@@ -1082,7 +1123,12 @@ def main():
             print("Audio: disabled for this transport.")
 
         print("Connected. Starting desktop capture; press Ctrl+C to stop.")
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0)
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0)
+        except OSError as exc:
+            stop_status.set()
+            print("Capture could not start: %s" % exc)
+            return 1
         watchdog_thread = threading.Thread(
             target=watchdog_loop,
             args=(stats, proc, stop_status),
@@ -1119,8 +1165,9 @@ def main():
                 proc.wait()
 
         if interrupted:
-            raise SystemExit(130)
+            return 130
+        return 0 if proc.returncode == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

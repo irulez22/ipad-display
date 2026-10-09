@@ -3,3 +3,10 @@
 /packages/
 .DS_Store
 *.deb
+
+__pycache__/
+*.pyc
+/diagnostics/
+/tools/linux-receiver/bin/
+**/x64/Debug/
+**/x64/Release/

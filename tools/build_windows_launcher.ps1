@@ -49,7 +49,7 @@ if (-not (Test-Path $csc)) {
   throw "C# compiler not found."
 }
 
-& $csc /nologo /target:winexe /optimize+ /win32manifest:"$manifest" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /out:"$exe" "$src"
+& $csc /nologo /target:winexe /optimize+ /win32manifest:"$manifest" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll /out:"$exe" "$src"
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) {
   throw "PadDisplay launcher build failed."
 }

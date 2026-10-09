@@ -12,6 +12,7 @@
 @property(nonatomic) CMVideoFormatDescriptionRef formatDescription;
 @property(nonatomic) VTDecompressionSessionRef session;
 @property(nonatomic) NSUInteger frameCount;
+@property(nonatomic) BOOL discardUntilAUD;
 @property(nonatomic) NSUInteger errorCount;
 @property(nonatomic) dispatch_semaphore_t presentationSlots;
 @property(nonatomic,strong) dispatch_queue_t presentationQueue;
@@ -24,10 +25,11 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
 - (void)dealloc { [self destroySession]; if(_formatDescription) CFRelease(_formatDescription); }
 - (void)report:(NSString*)s { id<PDVideoDecoderDelegate>d=self.delegate; if(d)[d videoDecoder:self didUpdateStatus:s]; PDLog(@"Decoder: %@",s); }
 - (void)destroySession { if(self.session){ PDLog(@"Decoder destroying session frames=%lu errors=%lu",(unsigned long)self.frameCount,(unsigned long)self.errorCount); VTDecompressionSessionWaitForAsynchronousFrames(self.session); VTDecompressionSessionInvalidate(self.session); CFRelease(self.session); self.session=NULL; } }
-- (void)reset { PDLog(@"Decoder reset"); [self.accessUnit setLength:0]; [self destroySession]; self.sps=nil; self.pps=nil; self.frameCount=0; self.errorCount=0; if(self.formatDescription){CFRelease(self.formatDescription);self.formatDescription=NULL;} dispatch_async(dispatch_get_main_queue(), ^{[self.displayLayer flushAndRemoveImage];}); }
+- (void)reset { PDLog(@"Decoder reset"); self.discardUntilAUD=NO; [self.accessUnit setLength:0]; [self destroySession]; self.sps=nil; self.pps=nil; self.frameCount=0; self.errorCount=0; if(self.formatDescription){CFRelease(self.formatDescription);self.formatDescription=NULL;} dispatch_async(dispatch_get_main_queue(), ^{[self.displayLayer flushAndRemoveImage];}); }
 
 - (void)ensureSession {
     if(self.session || !self.sps || !self.pps) return;
+    if(self.formatDescription){CFRelease(self.formatDescription);self.formatDescription=NULL;}
     const uint8_t*p[2]={self.sps.bytes,self.pps.bytes};
     const size_t z[2]={self.sps.length,self.pps.length};
     OSStatus s=CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault,2,p,z,4,&_formatDescription);
@@ -58,10 +60,26 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
 }
 - (void)decodeNALUnit:(NSData*)nal type:(uint8_t)t {
     if(!nal.length)return;
-    if(t==9){[self decodeAccessUnit];return;}
-    if(t==7){self.sps=[nal copy];[self report:@"SPS received"];return;}
-    if(t==8){self.pps=[nal copy];[self report:@"PPS received"];[self ensureSession];return;}
-    if(t==6 || t==1 || t==5){[self appendAVCCNAL:nal];return;}
+    if(t==9){[self decodeAccessUnit];self.discardUntilAUD=NO;return;}
+    if(self.discardUntilAUD)return;
+    if(t==7 || t==8){
+        NSData *previous = t==7 ? self.sps : self.pps;
+        if(previous && ![previous isEqualToData:nal]){
+            [self decodeAccessUnit];
+            [self destroySession];
+        }
+        if(t==7) self.sps=[nal copy]; else self.pps=[nal copy];
+        return;
+    }
+    if(t==6 || t==1 || t==5){
+        if(self.accessUnit.length + nal.length + 4 > 16 * 1024 * 1024){
+            [self.accessUnit setLength:0];
+            self.discardUntilAUD=YES;
+            [self report:@"Access unit exceeds limit; waiting for next AUD"];
+            return;
+        }
+        [self appendAVCCNAL:nal];return;
+    }
 }
 - (void)flush { [self decodeAccessUnit]; if(self.session)VTDecompressionSessionWaitForAsynchronousFrames(self.session); }
 - (void)presentImageBuffer:(CVImageBufferRef)imageBuffer status:(OSStatus)status {
@@ -92,7 +110,7 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
                 }
 
                 NSUInteger waits=0;
-                while(!self.displayLayer.readyForMoreMediaData){
+                while(self.displayLayer && !self.displayLayer.readyForMoreMediaData && waits < 1000){
                     usleep(1000);
                     waits++;
                     if(waits==50 || waits==250 || waits==1000){
@@ -101,7 +119,10 @@ static void PDDecompressionCallback(void *refCon, void *sourceFrameRefCon, OSSta
                 }
 
                 dispatch_sync(dispatch_get_main_queue(), ^{
-                    [self.displayLayer enqueueSampleBuffer:sb];
+                    if(self.displayLayer.status == AVQueuedSampleBufferRenderingStatusFailed)
+                        [self.displayLayer flush];
+                    if(self.displayLayer.readyForMoreMediaData)
+                        [self.displayLayer enqueueSampleBuffer:sb];
                 });
             } else {
                 PDLog(@"SampleBuffer creation failed status=%d",(int)e);

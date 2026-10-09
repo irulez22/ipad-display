@@ -302,13 +302,15 @@ $modes=@(
 )
 
 if ($NonInteractive) {
-  if (-not [string]::IsNullOrWhiteSpace($ReceiverHost)) {
-    $Resolution = "1366x768"
+  $savedScreen = if ($UseSavedSettings -and $saved.DisplayDeviceName) {
+    $screens | Where-Object { $_.DeviceName -eq $saved.DisplayDeviceName } | Select-Object -First 1
   }
-  if ($preferredScreenIndex -ge 0) {
-    $screen = $screens[$preferredScreenIndex]
+  if ($savedScreen) {
+    $screen = $savedScreen
   } elseif ($DisplayIndex -ge 0 -and $DisplayIndex -lt $screens.Count) {
     $screen = $screens[$DisplayIndex]
+  } elseif ($preferredScreenIndex -ge 0) {
+    $screen = $screens[$preferredScreenIndex]
   } else {
     $screen = $screens[$defaultScreen-1]
   }

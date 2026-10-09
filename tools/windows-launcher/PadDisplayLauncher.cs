@@ -69,10 +69,7 @@ class PadDisplayLauncher : Form
         fps.Items.AddRange(new object[] {"60","30"});
         bitrate.Dock = DockStyle.Fill;
         receiverHost.Dock = DockStyle.Fill;
-        receiverHost.TextChanged += delegate {
-            if(!String.IsNullOrWhiteSpace(receiverHost.Text))
-                resolution.SelectedItem = "1366x768";
-        };
+
 
         AddRow(top,0,"Display",display,"Resolution",resolution);
         AddRow(top,1,"FPS",fps,"Bitrate",bitrate);
@@ -90,7 +87,7 @@ class PadDisplayLauncher : Form
         start.Text="Start"; stop.Text="Stop"; save.Text="Save settings"; diagnostics.Text="Diagnostics";
         start.Width=90; stop.Width=90; save.Width=110; diagnostics.Width=100; stop.Enabled=false;
         buttons.Controls.Add(start); buttons.Controls.Add(stop); buttons.Controls.Add(save); buttons.Controls.Add(diagnostics);
-        top.Controls.Add(buttons,2,4); top.SetColumnSpan(buttons,2);
+        top.Controls.Add(buttons,0,5); top.SetColumnSpan(buttons,4);
 
         status.Text="Stopped"; status.Dock=DockStyle.Top; status.Height=50; status.Padding=new Padding(12,5,0,0);
         log.Dock=DockStyle.Fill; log.Multiline=true; log.ReadOnly=true; log.ScrollBars=ScrollBars.Vertical;
@@ -180,17 +177,20 @@ class PadDisplayLauncher : Form
     {
         int preferred=FindPreferredDisplayIndex();
         int n;
-        if(preferred>=0)
-            display.SelectedIndex=preferred;
+        string savedDevice = ReadReg("DisplayDeviceName", "");
+        int savedIndex = Array.FindIndex(Screen.AllScreens,
+            screen => String.Equals(screen.DeviceName, savedDevice, StringComparison.OrdinalIgnoreCase));
+        if(savedIndex >= 0)
+            display.SelectedIndex = savedIndex;
         else if(int.TryParse(ReadReg("DisplayIndex","-1"),out n) && n>=0 && n<display.Items.Count)
             display.SelectedIndex=n;
+        else if(preferred>=0)
+            display.SelectedIndex=preferred;
         string r=ReadReg("Resolution","1280x960");
         resolution.SelectedItem=resolution.Items.Contains(r)?r:"1280x960";
         string f=ReadReg("Fps","60"); fps.SelectedItem=f=="30"?"30":"60";
         bitrate.Text=ReadReg("Bitrate","6M");
         receiverHost.Text=ReadReg("ReceiverHost","");
-        if(!String.IsNullOrWhiteSpace(receiverHost.Text))
-            resolution.SelectedItem="1366x768";
         startup.Checked=ReadReg("StartWithWindows","False")=="True";
         autostart.Checked=ReadReg("AutoStartStream","False")=="True";
         minimized.Checked=ReadReg("StartMinimized","False")=="True";
@@ -308,26 +308,11 @@ class PadDisplayLauncher : Form
         Append("PadDisplay engine stopped.");
     }
 
-    string JsonValue(string json, string key)
+    string JsonValue(System.Collections.Generic.Dictionary<string, object> data, string key)
     {
-        string token = "\"" + key + "\":";
-        int start = json.IndexOf(token, StringComparison.Ordinal);
-        if(start < 0) return "";
-        start += token.Length;
-        while(start < json.Length && Char.IsWhiteSpace(json[start])) start++;
-        if(start >= json.Length) return "";
-
-        if(json[start] == '"')
-        {
-            start++;
-            int end = json.IndexOf('"', start);
-            return end < 0 ? "" : json.Substring(start, end - start);
-        }
-
-        int pos = start;
-        while(pos < json.Length && json[pos] != ',' && json[pos] != '}') pos++;
-        string value = json.Substring(start, pos - start).Trim();
-        return value == "null" ? "" : value;
+        object value;
+        return data.TryGetValue(key, out value) && value != null
+            ? Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) : "";
     }
 
     void UpdateTelemetry()
@@ -341,7 +326,8 @@ class PadDisplayLauncher : Form
                 return;
             }
 
-            string json = File.ReadAllText(StatusFile);
+            var json = new System.Web.Script.Serialization.JavaScriptSerializer()
+                .Deserialize<System.Collections.Generic.Dictionary<string, object>>(File.ReadAllText(StatusFile));
             string transport = JsonValue(json, "transport");
             string host = JsonValue(json, "host");
             string video = JsonValue(json, "video_mbps");
@@ -383,7 +369,7 @@ class PadDisplayLauncher : Form
         }
     }
 
-    void CollectDiagnostics()
+    async void CollectDiagnostics()
     {
         diagnostics.Enabled=false;
         Append("Collecting diagnostics...");
@@ -397,9 +383,12 @@ class PadDisplayLauncher : Form
             psi.RedirectStandardOutput=true;
             psi.RedirectStandardError=true;
             var p=Process.Start(psi);
-            string stdout=p.StandardOutput.ReadToEnd();
-            string stderr=p.StandardError.ReadToEnd();
-            p.WaitForExit();
+            var stdoutTask=p.StandardOutput.ReadToEndAsync();
+            var stderrTask=p.StandardError.ReadToEndAsync();
+            await System.Threading.Tasks.Task.WhenAll(stdoutTask, stderrTask);
+            await System.Threading.Tasks.Task.Run(() => p.WaitForExit());
+            string stdout=stdoutTask.Result;
+            string stderr=stderrTask.Result;
             if(!String.IsNullOrWhiteSpace(stdout)) Append(stdout.Trim());
             if(!String.IsNullOrWhiteSpace(stderr)) Append(stderr.Trim());
             if(p.ExitCode==0)

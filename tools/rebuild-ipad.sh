@@ -1,20 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd ~/ipad-display
+cd "$(dirname "$0")/.."
 
-echo "==> Restoring packaging control file..."
-git restore control 2>/dev/null || git checkout -- control
-
-echo "==> Resetting to latest GitHub main..."
-git fetch origin main
-git reset --hard origin/main
-git clean -fd
+echo "==> Building the current checkout (local changes are preserved)..."
 
 echo "==> Normalizing control line endings..."
 sed -i 's/\r$//' control
 
-export THEOS=/home/josh/theos
+export THEOS="${THEOS:-$HOME/theos}"
 if [ ! -f "$THEOS/makefiles/common.mk" ]; then
   echo "ERROR: Theos was not found at $THEOS" >&2
   exit 1
@@ -36,7 +30,7 @@ echo "==> Built PadDisplay $version"
 echo "    $deb"
 
 echo
-echo "==> GitHub is source of truth; rebuild does not commit or push repository changes."
+echo "==> Rebuild does not fetch, reset, clean, commit, or push source changes."
 
 if [ "${PADDISPLAY_NO_RELEASE:-0}" != "1" ]; then
   echo
