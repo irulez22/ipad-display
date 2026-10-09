@@ -899,7 +899,7 @@ def main():
             ]
         capture += [
             "-filter_complex",
-            "ddagrab=output_idx=%d:framerate=%d" % (args.display, args.fps),
+            "ddagrab=output_idx=%d:framerate=%d:draw_mouse=0" % (args.display, args.fps),
         ]
     else:
         vf = "scale=%s:%s:force_original_aspect_ratio=decrease,pad=%s:%s:(ow-iw)/2:(oh-ih)/2" % (
@@ -913,6 +913,8 @@ def main():
             "gdigrab",
             "-framerate",
             str(args.fps),
+            "-draw_mouse",
+            "0",
             "-i",
             "desktop",
             "-vf",
@@ -928,7 +930,7 @@ def main():
             "-tune",
             "ull",
             "-profile:v",
-            "baseline",
+            "high",
         ] + ([] if args.capture == "ddagrab" else [
             "-pix_fmt",
             "yuv420p",
@@ -943,6 +945,10 @@ def main():
             vbv_bufsize,
             "-rc-lookahead",
             "0",
+            "-spatial-aq",
+            "1",
+            "-aq-strength",
+            "8",
             "-g",
             str(args.fps),
             "-bf",
