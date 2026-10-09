@@ -59,6 +59,8 @@ static int gl_tex_w=0, gl_tex_h=0;
 static SDL_AudioDeviceID audio_dev=0;
 static SDL_AudioStream* audio_stream=nullptr;
 static bool fullscreen_=false;
+static int windowed_x=SDL_WINDOWPOS_CENTERED, windowed_y=SDL_WINDOWPOS_CENTERED;
+static int windowed_w=1366, windowed_h=768;
 static int stream_w=1366, stream_h=768;
 static AVBufferRef* hw_device=nullptr;
 static AVPixelFormat hw_fmt=AV_PIX_FMT_NONE;
@@ -553,6 +555,36 @@ static void NetworkThread(){
     }
     close(listener);
 }
+static void SetBorderlessFullscreen(bool enable){
+    if(!window_) return;
+
+    if(enable){
+        SDL_GetWindowPosition(window_,&windowed_x,&windowed_y);
+        SDL_GetWindowSize(window_,&windowed_w,&windowed_h);
+
+        int display=SDL_GetWindowDisplayIndex(window_);
+        SDL_Rect bounds{};
+        if(display<0 || SDL_GetDisplayBounds(display,&bounds)!=0){
+            Log(std::string("fullscreen: failed to get display bounds: ")+SDL_GetError());
+            return;
+        }
+
+        SDL_SetWindowBordered(window_,SDL_FALSE);
+        SDL_SetWindowPosition(window_,bounds.x,bounds.y);
+        SDL_SetWindowSize(window_,bounds.w,bounds.h);
+        SDL_RaiseWindow(window_);
+        fullscreen_=true;
+        Log("fullscreen: borderless "+std::to_string(bounds.w)+"x"+std::to_string(bounds.h));
+    } else {
+        SDL_SetWindowBordered(window_,SDL_TRUE);
+        SDL_SetWindowSize(window_,windowed_w,windowed_h);
+        SDL_SetWindowPosition(window_,windowed_x,windowed_y);
+        SDL_RaiseWindow(window_);
+        fullscreen_=false;
+        Log("fullscreen: restored window "+std::to_string(windowed_w)+"x"+std::to_string(windowed_h));
+    }
+}
+
 static uint16_t Norm(int v,int maxv){
     if(maxv<=1) return 0; v=std::max(0,std::min(v,maxv-1));
     return (uint16_t)((uint64_t)v*65535/(uint64_t)(maxv-1));
@@ -766,10 +798,18 @@ int main(){
             if(e.type==SDL_QUIT) running=false;
             else if(e.type==SDL_KEYDOWN||e.type==SDL_KEYUP){
                 bool up=e.type==SDL_KEYUP; SDL_Keymod mods=SDL_GetModState();
-                if(!up&&e.key.keysym.sym==SDLK_q&&(mods&KMOD_CTRL)&&(mods&KMOD_SHIFT)) running=false;
-                else if(!up&&e.key.keysym.sym==SDLK_F11){fullscreen_=!fullscreen_;SDL_SetWindowFullscreen(window_,fullscreen_?SDL_WINDOW_FULLSCREEN_DESKTOP:0);}
-                else if(!up&&e.key.keysym.sym==SDLK_ESCAPE&&fullscreen_){fullscreen_=false;SDL_SetWindowFullscreen(window_,0);}
-                else SendKey(e.key,up);
+
+                // F11 is a local receiver shortcut: consume both keydown and
+                // keyup so Windows never sees half of a key sequence.
+                if(e.key.keysym.sym==SDLK_F11){
+                    if(!up && e.key.repeat==0) SetBorderlessFullscreen(!fullscreen_);
+                } else if(!up&&e.key.keysym.sym==SDLK_q&&(mods&KMOD_CTRL)&&(mods&KMOD_SHIFT)){
+                    running=false;
+                } else if(e.key.keysym.sym==SDLK_ESCAPE&&fullscreen_){
+                    if(!up && e.key.repeat==0) SetBorderlessFullscreen(false);
+                } else {
+                    SendKey(e.key,up);
+                }
             } else if(e.type==SDL_MOUSEMOTION){
                 // Coalesce motion bursts and send only the newest absolute
                 // position once per render loop. Buttons/wheel remain immediate.
