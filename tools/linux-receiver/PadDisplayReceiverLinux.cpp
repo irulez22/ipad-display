@@ -18,6 +18,7 @@ extern "C" {
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
