@@ -42,5 +42,5 @@ Local controls: F11 toggles fullscreen, Escape leaves fullscreen, and
 Ctrl+Shift+Q exits. Logs are written to `~/.local/state/paddisplay/receiver.log`.
 
 This first Linux build prefers VA-API decode but copies decoded frames into an
-SDL texture for presentation. Once the Cloudbook is running reliably, the next
+SDL texture for presentation. On older Intel i965 hardware where VA surface readback is unavailable, run with `PADDISPLAY_DISABLE_VAAPI=1` for the software-decoder compatibility path. Once the Cloudbook is running reliably, the next
 optimization is a zero-copy VA-API/DRM or VA-API/OpenGL presentation path.
