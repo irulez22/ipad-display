@@ -42,6 +42,7 @@ static std::deque<uint8_t> audio_q;
 static constexpr size_t VIDEO_Q_MAX=8;
 static constexpr size_t AUDIO_MAX=48000*4*120/1000;
 static std::atomic<uint64_t> video_packets{0}, video_bytes{0}, frames{0};
+static std::atomic<uint64_t> frame_fingerprint{0};
 static std::atomic<uint64_t> audio_packets{0}, audio_underruns{0};
 
 static SDL_Window* window_=nullptr;
@@ -177,6 +178,14 @@ struct Decoder {
                                  w,h,AV_PIX_FMT_BGRA,SWS_FAST_BILINEAR,nullptr,nullptr,nullptr);
         if(!sws) return;
         if(sws_scale(sws,use->data,use->linesize,0,h,dst,lines)<=0) return;
+
+        uint64_t hash=1469598103934665603ULL;
+        const size_t sample_step=std::max<size_t>(4,buf.size()/4096);
+        for(size_t i=0;i<buf.size();i+=sample_step){
+            hash^=buf[i];
+            hash*=1099511628211ULL;
+        }
+        frame_fingerprint=hash;
 
         {
             std::lock_guard<std::mutex> lock(pending_frame_mtx);
@@ -460,6 +469,7 @@ int main(){
                 " video_packets="+std::to_string(video_packets.load())+
                 " video_bytes="+std::to_string(video_bytes.load())+
                 " frames="+std::to_string(frames.load())+
+                " frame_hash="+std::to_string(frame_fingerprint.load())+
                 " audio_packets="+std::to_string(audio_packets.load())+
                 " audio_underruns="+std::to_string(audio_underruns.load()));
             last=now;
