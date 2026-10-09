@@ -51,7 +51,7 @@ static SDL_GLContext gl_context=nullptr;
 static GLuint gl_texture=0;
 static int gl_tex_w=0, gl_tex_h=0;
 static SDL_AudioDeviceID audio_dev=0;
-static bool fullscreen_=true;
+static bool fullscreen_=false;
 static int stream_w=1366, stream_h=768;
 static AVBufferRef* hw_device=nullptr;
 static AVPixelFormat hw_fmt=AV_PIX_FMT_NONE;
@@ -419,7 +419,7 @@ int main(){
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,1);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
     window_=SDL_CreateWindow("PadDisplay Linux Client",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,1366,768,
-                             SDL_WINDOW_SHOWN|SDL_WINDOW_RESIZABLE|SDL_WINDOW_FULLSCREEN_DESKTOP|SDL_WINDOW_OPENGL);
+                             SDL_WINDOW_SHOWN|SDL_WINDOW_RESIZABLE|SDL_WINDOW_OPENGL);
     if(!window_){fprintf(stderr,"SDL window failed: %s\n",SDL_GetError());return 1;}
     gl_context=SDL_GL_CreateContext(window_);
     if(!gl_context){fprintf(stderr,"OpenGL context failed: %s\n",SDL_GetError());return 1;}
@@ -431,6 +431,8 @@ int main(){
     glLoadIdentity();
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
+    const char* video_driver=SDL_GetCurrentVideoDriver();
+    Log(std::string("SDL video driver: ")+(video_driver?video_driver:"unknown"));
     Log(std::string("SDL presentation: OpenGL ")+
         reinterpret_cast<const char*>(glGetString(GL_VERSION)));
     status_font=TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",36);
