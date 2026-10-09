@@ -1,5 +1,6 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#define GL_GLEXT_PROTOTYPES
 #include <SDL2/SDL_opengl.h>
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -50,7 +51,8 @@ static std::atomic<uint64_t> audio_packets{0}, audio_underruns{0};
 
 static SDL_Window* window_=nullptr;
 static SDL_GLContext gl_context=nullptr;
-static GLuint gl_texture=0;
+static GLuint gl_yuv_textures[3]={0,0,0};
+static GLuint gl_yuv_program=0;
 static int gl_tex_w=0, gl_tex_h=0;
 static SDL_AudioDeviceID audio_dev=0;
 static bool fullscreen_=false;
@@ -62,8 +64,9 @@ static std::mutex render_mtx;
 
 struct PendingVideoFrame {
     int w=0, h=0;
-    int pitch=0;
-    std::vector<uint8_t> bgra;
+    std::vector<uint8_t> y;
+    std::vector<uint8_t> u;
+    std::vector<uint8_t> v;
     bool ready=false;
 };
 static std::mutex pending_frame_mtx;
@@ -120,6 +123,97 @@ static AVPixelFormat GetHwFormat(AVCodecContext*,const AVPixelFormat* fmts){
     return fmts[0];
 }
 
+
+static GLuint CompileShader(GLenum type,const char* source){
+    GLuint shader=glCreateShader(type);
+    if(!shader) return 0;
+    glShaderSource(shader,1,&source,nullptr);
+    glCompileShader(shader);
+    GLint ok=0;
+    glGetShaderiv(shader,GL_COMPILE_STATUS,&ok);
+    if(!ok){
+        char log[2048]{};
+        GLsizei n=0;
+        glGetShaderInfoLog(shader,sizeof(log)-1,&n,log);
+        Log(std::string("OpenGL shader compile failed: ")+log);
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+static bool InitYuvShader(){
+    static const char* vertex_source=
+        "#version 120\n"
+        "void main(){\n"
+        "  gl_Position=gl_Vertex;\n"
+        "  gl_TexCoord[0]=gl_MultiTexCoord0;\n"
+        "}\n";
+
+    // NVENC/libx264 desktop video is normally limited-range YUV. BT.709 is the
+    // right matrix for HD desktop content and keeps conversion on the GPU.
+    static const char* fragment_source=
+        "#version 120\n"
+        "uniform sampler2D texY;\n"
+        "uniform sampler2D texU;\n"
+        "uniform sampler2D texV;\n"
+        "void main(){\n"
+        "  vec2 uv=gl_TexCoord[0].st;\n"
+        "  float y=1.16438356*(texture2D(texY,uv).r-0.06274510);\n"
+        "  float u=texture2D(texU,uv).r-0.5;\n"
+        "  float v=texture2D(texV,uv).r-0.5;\n"
+        "  vec3 rgb=vec3(y+1.79274107*v,\n"
+        "                y-0.21324861*u-0.53290933*v,\n"
+        "                y+2.11240179*u);\n"
+        "  gl_FragColor=vec4(clamp(rgb,0.0,1.0),1.0);\n"
+        "}\n";
+
+    GLuint vs=CompileShader(GL_VERTEX_SHADER,vertex_source);
+    GLuint fs=CompileShader(GL_FRAGMENT_SHADER,fragment_source);
+    if(!vs||!fs){
+        if(vs) glDeleteShader(vs);
+        if(fs) glDeleteShader(fs);
+        return false;
+    }
+
+    gl_yuv_program=glCreateProgram();
+    glAttachShader(gl_yuv_program,vs);
+    glAttachShader(gl_yuv_program,fs);
+    glLinkProgram(gl_yuv_program);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    GLint ok=0;
+    glGetProgramiv(gl_yuv_program,GL_LINK_STATUS,&ok);
+    if(!ok){
+        char log[2048]{};
+        GLsizei n=0;
+        glGetProgramInfoLog(gl_yuv_program,sizeof(log)-1,&n,log);
+        Log(std::string("OpenGL shader link failed: ")+log);
+        glDeleteProgram(gl_yuv_program);
+        gl_yuv_program=0;
+        return false;
+    }
+
+    glUseProgram(gl_yuv_program);
+    glUniform1i(glGetUniformLocation(gl_yuv_program,"texY"),0);
+    glUniform1i(glGetUniformLocation(gl_yuv_program,"texU"),1);
+    glUniform1i(glGetUniformLocation(gl_yuv_program,"texV"),2);
+    glUseProgram(0);
+    return true;
+}
+
+static void CopyPlane(std::vector<uint8_t>& dst,const uint8_t* src,int stride,int w,int h){
+    dst.resize((size_t)w*(size_t)h);
+    if(!src || w<=0 || h<=0) return;
+    if(stride==w){
+        memcpy(dst.data(),src,dst.size());
+        return;
+    }
+    for(int row=0;row<h;++row)
+        memcpy(dst.data()+(size_t)row*(size_t)w,src+(ptrdiff_t)row*stride,(size_t)w);
+}
+
 struct Decoder {
     AVCodecContext* ctx=nullptr;
     AVCodecParserContext* parser=nullptr;
@@ -173,49 +267,73 @@ struct Decoder {
         }
 
         const int w=use->width, h=use->height;
-        const int pitch=w*4;
         if(w<=0 || h<=0) return;
 
-        std::vector<uint8_t> buf((size_t)pitch*(size_t)h);
-        uint8_t* dst[4]={buf.data(),nullptr,nullptr,nullptr};
-        int lines[4]={pitch,0,0,0};
+        AVFrame* yuv=use;
+        AVFrame* converted=nullptr;
+        SwsContext* local_sws=nullptr;
 
-        sws=sws_getCachedContext(sws,w,h,(AVPixelFormat)use->format,
-                                 w,h,AV_PIX_FMT_BGRA,SWS_FAST_BILINEAR,nullptr,nullptr,nullptr);
-        if(!sws) return;
-        if(sws_scale(sws,use->data,use->linesize,0,h,dst,lines)<=0) return;
+        const AVPixelFormat fmt=(AVPixelFormat)use->format;
+        if(fmt!=AV_PIX_FMT_YUV420P && fmt!=AV_PIX_FMT_YUVJ420P){
+            converted=av_frame_alloc();
+            if(!converted) return;
+            converted->format=AV_PIX_FMT_YUV420P;
+            converted->width=w;
+            converted->height=h;
+            if(av_frame_get_buffer(converted,32)<0){
+                av_frame_free(&converted);
+                return;
+            }
+            local_sws=sws_getContext(w,h,fmt,w,h,AV_PIX_FMT_YUV420P,
+                                     SWS_FAST_BILINEAR,nullptr,nullptr,nullptr);
+            if(!local_sws ||
+               sws_scale(local_sws,use->data,use->linesize,0,h,
+                         converted->data,converted->linesize)<=0){
+                if(local_sws) sws_freeContext(local_sws);
+                av_frame_free(&converted);
+                return;
+            }
+            yuv=converted;
+        }
 
+        const int cw=(w+1)/2;
+        const int ch=(h+1)/2;
+        PendingVideoFrame out;
+        out.w=w;
+        out.h=h;
+        CopyPlane(out.y,yuv->data[0],yuv->linesize[0],w,h);
+        CopyPlane(out.u,yuv->data[1],yuv->linesize[1],cw,ch);
+        CopyPlane(out.v,yuv->data[2],yuv->linesize[2],cw,ch);
+
+        if(local_sws) sws_freeContext(local_sws);
+        if(converted) av_frame_free(&converted);
+
+        // Lightweight luma-only diagnostics. Avoid the former RGB conversion
+        // and sampling cost in the hot path.
         uint64_t hash=1469598103934665603ULL;
         constexpr size_t sample_count=4096;
         std::vector<uint32_t> samples;
         samples.reserve(sample_count);
         uint64_t changed=0;
-        for(size_t n=0;n<sample_count;++n){
-            size_t pixel=((uint64_t)n*(uint64_t)(w*h))/sample_count;
-            if(pixel>=(size_t)w*(size_t)h) pixel=(size_t)w*(size_t)h-1;
-            const uint8_t* px=buf.data()+pixel*4;
-            uint32_t rgb=(uint32_t(px[2])<<16)|(uint32_t(px[1])<<8)|uint32_t(px[0]);
-            samples.push_back(rgb);
-            hash^=rgb;
+        const size_t pixels=out.y.size();
+        for(size_t n=0;n<sample_count && pixels;++n){
+            size_t i=((uint64_t)n*(uint64_t)pixels)/sample_count;
+            if(i>=pixels) i=pixels-1;
+            uint32_t value=out.y[i];
+            samples.push_back(value);
+            hash^=value;
             hash*=1099511628211ULL;
-            if(prev_samples.size()==sample_count){
-                uint32_t old=prev_samples[n];
-                int dr=std::abs(int((rgb>>16)&255)-int((old>>16)&255));
-                int dg=std::abs(int((rgb>>8)&255)-int((old>>8)&255));
-                int db=std::abs(int(rgb&255)-int(old&255));
-                if(std::max({dr,dg,db})>12) ++changed;
-            }
+            if(prev_samples.size()==sample_count &&
+               std::abs(int(value)-int(prev_samples[n]))>6) ++changed;
         }
         frame_fingerprint=hash;
-        frame_change_ppm=prev_samples.size()==sample_count ? (changed*1000000ULL/sample_count) : 0;
+        frame_change_ppm=prev_samples.size()==sample_count ?
+            (changed*1000000ULL/sample_count) : 0;
         prev_samples=std::move(samples);
 
         {
             std::lock_guard<std::mutex> lock(pending_frame_mtx);
-            pending_frame.w=w;
-            pending_frame.h=h;
-            pending_frame.pitch=pitch;
-            pending_frame.bgra=std::move(buf);
+            pending_frame=std::move(out);
             pending_frame.ready=true;
         }
     }
@@ -385,39 +503,48 @@ static void SendKey(const SDL_KeyboardEvent& e,bool up){
     SendPacket(KEYBOARD_V1,p,sizeof(p));
 }
 
+static void SetupYuvTexture(GLuint texture,int unit,int w,int h,const uint8_t* pixels,bool allocate){
+    glActiveTexture(GL_TEXTURE0+unit);
+    glBindTexture(GL_TEXTURE_2D,texture);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    if(allocate)
+        glTexImage2D(GL_TEXTURE_2D,0,GL_LUMINANCE,w,h,0,GL_LUMINANCE,GL_UNSIGNED_BYTE,pixels);
+    else
+        glTexSubImage2D(GL_TEXTURE_2D,0,0,0,w,h,GL_LUMINANCE,GL_UNSIGNED_BYTE,pixels);
+}
+
 static bool RenderPendingFrame(){
     PendingVideoFrame frame;
     {
         std::lock_guard<std::mutex> lock(pending_frame_mtx);
         if(!pending_frame.ready) return false;
-        frame.w=pending_frame.w;
-        frame.h=pending_frame.h;
-        frame.pitch=pending_frame.pitch;
-        frame.bgra=std::move(pending_frame.bgra);
-        pending_frame.ready=false;
+        frame=std::move(pending_frame);
+        pending_frame=PendingVideoFrame{};
     }
 
-    if(frame.w<=0 || frame.h<=0 || frame.pitch<=0 || frame.bgra.empty() || !window_ || !gl_context) return false;
+    if(frame.w<=0 || frame.h<=0 || frame.y.empty() || frame.u.empty() || frame.v.empty() ||
+       !window_ || !gl_context || !gl_yuv_program) return false;
 
-    if(!gl_texture) glGenTextures(1,&gl_texture);
-    glBindTexture(GL_TEXTURE_2D,gl_texture);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    if(!gl_yuv_textures[0]) glGenTextures(3,gl_yuv_textures);
     glPixelStorei(GL_UNPACK_ALIGNMENT,1);
 
-    if(frame.w!=gl_tex_w || frame.h!=gl_tex_h){
+    const int cw=(frame.w+1)/2;
+    const int ch=(frame.h+1)/2;
+    const bool allocate=(frame.w!=gl_tex_w || frame.h!=gl_tex_h);
+
+    SetupYuvTexture(gl_yuv_textures[0],0,frame.w,frame.h,frame.y.data(),allocate);
+    SetupYuvTexture(gl_yuv_textures[1],1,cw,ch,frame.u.data(),allocate);
+    SetupYuvTexture(gl_yuv_textures[2],2,cw,ch,frame.v.data(),allocate);
+
+    if(allocate){
         gl_tex_w=frame.w;
         gl_tex_h=frame.h;
-        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,frame.w,frame.h,0,
-                     GL_BGRA,GL_UNSIGNED_BYTE,frame.bgra.data());
         stream_w=frame.w;
         stream_h=frame.h;
-        Log("video mode: "+std::to_string(stream_w)+"x"+std::to_string(stream_h)+" OpenGL");
-    } else {
-        glTexSubImage2D(GL_TEXTURE_2D,0,0,0,frame.w,frame.h,
-                        GL_BGRA,GL_UNSIGNED_BYTE,frame.bgra.data());
+        Log("video mode: "+std::to_string(stream_w)+"x"+std::to_string(stream_h)+" OpenGL YUV420");
     }
 
     int dw=1,dh=1;
@@ -428,18 +555,18 @@ static bool RenderPendingFrame(){
 
     const float src_aspect=(float)frame.w/(float)frame.h;
     const float dst_aspect=(float)dw/(float)dh;
-    float sx=1.f, sy=1.f;
+    float sx=1.f,sy=1.f;
     if(dst_aspect>src_aspect) sx=src_aspect/dst_aspect;
     else sy=dst_aspect/src_aspect;
 
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D,gl_texture);
+    glUseProgram(gl_yuv_program);
     glBegin(GL_QUADS);
-      glTexCoord2f(0.f,0.f); glVertex2f(-sx, sy);
-      glTexCoord2f(1.f,0.f); glVertex2f( sx, sy);
-      glTexCoord2f(1.f,1.f); glVertex2f( sx,-sy);
-      glTexCoord2f(0.f,1.f); glVertex2f(-sx,-sy);
+      glMultiTexCoord2f(GL_TEXTURE0,0.f,0.f); glVertex2f(-sx, sy);
+      glMultiTexCoord2f(GL_TEXTURE0,1.f,0.f); glVertex2f( sx, sy);
+      glMultiTexCoord2f(GL_TEXTURE0,1.f,1.f); glVertex2f( sx,-sy);
+      glMultiTexCoord2f(GL_TEXTURE0,0.f,1.f); glVertex2f(-sx,-sy);
     glEnd();
+    glUseProgram(0);
 
     SDL_GL_SwapWindow(window_);
     ++frames;
@@ -452,6 +579,7 @@ static void DrawStatus(const char* message){
     int dw=1,dh=1;
     SDL_GL_GetDrawableSize(window_,&dw,&dh);
     glViewport(0,0,dw,dh);
+    glUseProgram(0);
     glClearColor(0.07f,0.07f,0.09f,1.f);
     glClear(GL_COLOR_BUFFER_BIT);
     SDL_GL_SwapWindow(window_);
@@ -480,6 +608,10 @@ int main(){
     glLoadIdentity();
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
+    if(!InitYuvShader()){
+        fprintf(stderr,"OpenGL YUV shader initialization failed; see receiver log.\n");
+        return 1;
+    }
     const char* video_driver=SDL_GetCurrentVideoDriver();
     Log(std::string("SDL video driver: ")+(video_driver?video_driver:"unknown"));
     Log(std::string("SDL presentation: OpenGL ")+
@@ -575,7 +707,8 @@ int main(){
     video_cv.notify_all();
     net.join(); dec.join(); aud.join();
     if(audio_dev) SDL_CloseAudioDevice(audio_dev);
-    if(gl_texture) glDeleteTextures(1,&gl_texture);
+    if(gl_yuv_textures[0]) glDeleteTextures(3,gl_yuv_textures);
+    if(gl_yuv_program) glDeleteProgram(gl_yuv_program);
     if(gl_context){ SDL_GL_DeleteContext(gl_context); gl_context=nullptr; }
     if(status_font) TTF_CloseFont(status_font);
     if(window_) SDL_DestroyWindow(window_);
