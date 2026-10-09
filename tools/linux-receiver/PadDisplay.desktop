@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=PadDisplay
+Comment=Use this Linux laptop as a PadDisplay receiver
+Exec=/bin/sh -lc '$HOME/ipad-display/tools/linux-receiver/launch-desktop.sh'
+Icon=video-display
+Terminal=false
+Categories=Network;AudioVideo;
+StartupNotify=false
