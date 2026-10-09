@@ -6,8 +6,15 @@ cd ~/ipad-display
 echo "==> Restoring packaging control file..."
 git restore control 2>/dev/null || git checkout -- control
 
-echo "==> Pulling latest changes..."
-git pull --ff-only
+echo "==> Syncing latest changes..."
+branch="$(git rev-parse --abbrev-ref HEAD)"
+git fetch origin "$branch"
+if ! git rebase --autostash "origin/$branch"; then
+  echo "ERROR: Startup rebase conflicted; aborting and preserving local commits." >&2
+  git rebase --abort >/dev/null 2>&1 || true
+  echo "       Resolve manually with: git pull --rebase --autostash origin $branch" >&2
+  exit 1
+fi
 
 echo "==> Normalizing control line endings..."
 sed -i 's/\r$//' control
