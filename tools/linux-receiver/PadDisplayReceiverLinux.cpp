@@ -570,12 +570,14 @@ static void SetBorderlessFullscreen(bool enable){
         }
 
         SDL_SetWindowBordered(window_,SDL_FALSE);
+        SDL_SetWindowAlwaysOnTop(window_,SDL_TRUE);
         SDL_SetWindowPosition(window_,bounds.x,bounds.y);
         SDL_SetWindowSize(window_,bounds.w,bounds.h);
         SDL_RaiseWindow(window_);
         fullscreen_=true;
         Log("fullscreen: borderless "+std::to_string(bounds.w)+"x"+std::to_string(bounds.h));
     } else {
+        SDL_SetWindowAlwaysOnTop(window_,SDL_FALSE);
         SDL_SetWindowBordered(window_,SDL_TRUE);
         SDL_SetWindowSize(window_,windowed_w,windowed_h);
         SDL_SetWindowPosition(window_,windowed_x,windowed_y);
