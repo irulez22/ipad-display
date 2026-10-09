@@ -18,6 +18,7 @@ VIDEO_H264 = 0x01
 DISCONNECT = 0x04
 AUDIO_PCM = 0x20
 AUDIO_PCM_V2 = 0x21
+AUDIO_FORMAT = 0x22
 CONFIG = 0x03
 PROTOCOL_VERSION = 1
 TOUCH_V1 = 0x10
@@ -704,14 +705,56 @@ def audio_loop(host, port, helper_path, stats=None):
         proc = subprocess.Popen(
             [helper_path],
             stdout=subprocess.PIPE,
-            stderr=None,
+            stderr=subprocess.PIPE,
             bufsize=0,
         )
     except Exception as exc:
         print("Audio: could not start WASAPI loopback helper: %s" % exc)
         return
 
-    chunk = 3840  # 20 ms of 48kHz stereo s16le
+    # The helper begins stdout with one ASCII metadata line, then raw native
+    # WASAPI mix-format samples.
+    header = proc.stdout.readline()
+    if not header:
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+        err = b""
+        try:
+            err = proc.stderr.read()
+        except Exception:
+            pass
+        print("Audio: WASAPI helper exited before format handshake (code %s): %s" %
+              (proc.poll(), err.decode("utf-8", "replace").strip()), flush=True)
+        return
+
+    try:
+        parts = header.decode("ascii", "strict").strip().split()
+        if len(parts) != 5 or parts[0] != "PDAUDIO":
+            raise ValueError("unexpected helper header %r" % header)
+        sample_rate = int(parts[1])
+        channels = int(parts[2])
+        format_name = parts[3]
+        block_align = int(parts[4])
+        format_codes = {"s16": 1, "s32": 3, "f32": 4}
+        format_code = format_codes[format_name]
+        if sample_rate <= 0 or channels <= 0 or block_align <= 0:
+            raise ValueError("invalid helper format")
+    except Exception as exc:
+        print("Audio: invalid WASAPI helper format handshake: %s" % exc, flush=True)
+        return
+
+    send_packet(
+        audio_sock,
+        AUDIO_FORMAT,
+        struct.pack(">IBBH", sample_rate, channels, format_code, block_align),
+    )
+    print("Audio: native WASAPI %d Hz, %d ch, %s -> Linux SDL conversion." %
+          (sample_rate, channels, format_name), flush=True)
+
+    chunk = max(block_align, int(sample_rate * block_align / 50))
+    chunk -= chunk % block_align
     pending = bytearray()
     sequence = 0
     try:
@@ -720,10 +763,6 @@ def audio_loop(host, port, helper_path, stats=None):
             if not data:
                 break
 
-            # Pipe reads are not guaranteed to preserve the helper's write
-            # boundaries. Never discard a partial stereo PCM frame: carrying
-            # those bytes forward is essential or all subsequent samples can
-            # become byte-shifted and sound like static/garbled audio.
             pending.extend(data)
 
             while len(pending) >= chunk:
@@ -736,8 +775,7 @@ def audio_loop(host, port, helper_path, stats=None):
                     stats.add_audio(chunk)
                 del pending[:chunk]
 
-        # Send any final complete PCM frames without losing alignment.
-        usable = len(pending) - (len(pending) % 4)
+        usable = len(pending) - (len(pending) % block_align)
         if usable:
             pcm = bytes(pending[:usable])
             timestamp_us = int(time.monotonic() * 1000000.0)
