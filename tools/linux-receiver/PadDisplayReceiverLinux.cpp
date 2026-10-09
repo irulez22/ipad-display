@@ -44,6 +44,7 @@ static constexpr size_t VIDEO_Q_MAX=8;
 static constexpr size_t AUDIO_MAX=48000*4*120/1000;
 static std::atomic<uint64_t> video_packets{0}, video_bytes{0}, frames{0};
 static std::atomic<uint64_t> frame_fingerprint{0};
+static std::atomic<uint64_t> frame_change_ppm{0};
 static std::atomic<uint64_t> audio_packets{0}, audio_underruns{0};
 
 static SDL_Window* window_=nullptr;
@@ -125,6 +126,7 @@ struct Decoder {
     AVPacket* pkt=nullptr;
     SwsContext* sws=nullptr;
     bool hw=false;
+    std::vector<uint32_t> prev_samples;
 
     bool Init(){
         const AVCodec* codec=avcodec_find_decoder(AV_CODEC_ID_H264);
@@ -182,12 +184,29 @@ struct Decoder {
         if(sws_scale(sws,use->data,use->linesize,0,h,dst,lines)<=0) return;
 
         uint64_t hash=1469598103934665603ULL;
-        const size_t sample_step=std::max<size_t>(4,buf.size()/4096);
-        for(size_t i=0;i<buf.size();i+=sample_step){
-            hash^=buf[i];
+        constexpr size_t sample_count=4096;
+        std::vector<uint32_t> samples;
+        samples.reserve(sample_count);
+        uint64_t changed=0;
+        for(size_t n=0;n<sample_count;++n){
+            size_t pixel=((uint64_t)n*(uint64_t)(w*h))/sample_count;
+            if(pixel>=(size_t)w*(size_t)h) pixel=(size_t)w*(size_t)h-1;
+            const uint8_t* px=buf.data()+pixel*4;
+            uint32_t rgb=(uint32_t(px[2])<<16)|(uint32_t(px[1])<<8)|uint32_t(px[0]);
+            samples.push_back(rgb);
+            hash^=rgb;
             hash*=1099511628211ULL;
+            if(prev_samples.size()==sample_count){
+                uint32_t old=prev_samples[n];
+                int dr=std::abs(int((rgb>>16)&255)-int((old>>16)&255));
+                int dg=std::abs(int((rgb>>8)&255)-int((old>>8)&255));
+                int db=std::abs(int(rgb&255)-int(old&255));
+                if(std::max({dr,dg,db})>12) ++changed;
+            }
         }
         frame_fingerprint=hash;
+        frame_change_ppm=prev_samples.size()==sample_count ? (changed*1000000ULL/sample_count) : 0;
+        prev_samples=std::move(samples);
 
         {
             std::lock_guard<std::mutex> lock(pending_frame_mtx);
@@ -483,6 +502,7 @@ int main(){
                 " video_bytes="+std::to_string(video_bytes.load())+
                 " frames="+std::to_string(frames.load())+
                 " frame_hash="+std::to_string(frame_fingerprint.load())+
+                " frame_change_ppm="+std::to_string(frame_change_ppm.load())+
                 " audio_packets="+std::to_string(audio_packets.load())+
                 " audio_underruns="+std::to_string(audio_underruns.load()));
             last=now;
