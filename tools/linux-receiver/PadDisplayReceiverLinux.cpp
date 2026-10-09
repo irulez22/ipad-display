@@ -33,7 +33,7 @@ extern "C" {
 
 static constexpr uint8_t VIDEO_H264=0x01, CONFIG=0x03, DISCONNECT=0x04;
 static constexpr uint8_t MOUSE_V1=0x12, KEYBOARD_V1=0x13;
-static constexpr uint8_t AUDIO_PCM=0x20, AUDIO_PCM_V2=0x21;
+static constexpr uint8_t AUDIO_PCM=0x20, AUDIO_PCM_V2=0x21, AUDIO_FORMAT=0x22;
 
 static std::atomic<bool> running{true}, connected{false};
 static int client_fd=-1;
@@ -57,6 +57,7 @@ static GLuint gl_yuv_textures[3]={0,0,0};
 static GLuint gl_yuv_program=0;
 static int gl_tex_w=0, gl_tex_h=0;
 static SDL_AudioDeviceID audio_dev=0;
+static SDL_AudioStream* audio_stream=nullptr;
 static bool fullscreen_=false;
 static int stream_w=1366, stream_h=768;
 static AVBufferRef* hw_device=nullptr;
@@ -369,10 +370,21 @@ static void DecodeThread(){
     }
 }
 static void ResetAudioPlayback(){
-    if(!audio_dev) return;
-    SDL_PauseAudioDevice(audio_dev,1);
-    SDL_ClearQueuedAudio(audio_dev);
+    if(audio_dev){
+        SDL_PauseAudioDevice(audio_dev,1);
+        SDL_ClearQueuedAudio(audio_dev);
+    }
+    if(audio_stream) SDL_AudioStreamClear(audio_stream);
     audio_playing=false;
+}
+
+static SDL_AudioFormat AudioFormatFromWire(uint8_t code){
+    switch(code){
+        case 1: return AUDIO_S16LSB;
+        case 3: return AUDIO_S32LSB;
+        case 4: return AUDIO_F32LSB;
+        default: return 0;
+    }
 }
 
 static void AudioThread(){
@@ -387,6 +399,7 @@ static void AudioThread(){
         if(fd<0) continue;
 
         ResetAudioPlayback();
+        if(audio_stream){ SDL_FreeAudioStream(audio_stream); audio_stream=nullptr; }
         Log("audio connected");
 
         while(running){
@@ -397,35 +410,90 @@ static void AudioThread(){
             std::vector<uint8_t> p(n);
             if(n&&!ReadExact(fd,p.data(),n)) break;
 
-            size_t off=0;
-            if(h[4]==AUDIO_PCM_V2 && n>=12) off=12;
-            else if(h[4]!=AUDIO_PCM) continue;
+            if(h[4]==AUDIO_FORMAT){
+                if(n!=8){
+                    Log("audio format packet invalid length");
+                    continue;
+                }
+                uint32_t rate=(uint32_t(p[0])<<24)|(uint32_t(p[1])<<16)|(uint32_t(p[2])<<8)|p[3];
+                uint8_t channels=p[4];
+                uint8_t format_code=p[5];
+                uint16_t block_align=(uint16_t(p[6])<<8)|p[7];
+                SDL_AudioFormat src_format=AudioFormatFromWire(format_code);
+                if(!src_format || rate==0 || channels==0 || block_align==0){
+                    Log("audio format packet unsupported");
+                    continue;
+                }
 
-            size_t usable=(p.size()-off)&~size_t(3);
-            if(!usable || !audio_dev) continue;
-
-            Uint32 queued=SDL_GetQueuedAudioSize(audio_dev);
-            if(queued>AUDIO_MAX){
-                SDL_ClearQueuedAudio(audio_dev);
-                audio_playing=false;
-                ++audio_underruns;
-                queued=0;
-            }
-
-            if(SDL_QueueAudio(audio_dev,p.data()+off,(Uint32)usable)!=0){
-                Log(std::string("SDL_QueueAudio failed: ")+SDL_GetError());
+                if(audio_stream){ SDL_FreeAudioStream(audio_stream); audio_stream=nullptr; }
+                audio_stream=SDL_NewAudioStream(
+                    src_format, channels, (int)rate,
+                    AUDIO_S16LSB, 2, 48000
+                );
+                if(!audio_stream){
+                    Log(std::string("SDL_NewAudioStream failed: ")+SDL_GetError());
+                    continue;
+                }
+                Log("audio source: rate="+std::to_string(rate)+
+                    " channels="+std::to_string((unsigned)channels)+
+                    " format_code="+std::to_string((unsigned)format_code)+
+                    " block_align="+std::to_string(block_align)+
+                    " -> 48000 stereo s16");
                 continue;
             }
-            ++audio_packets;
 
-            queued=SDL_GetQueuedAudioSize(audio_dev);
-            if(!audio_playing.load() && queued>=AUDIO_START_BYTES){
-                SDL_PauseAudioDevice(audio_dev,0);
-                audio_playing=true;
+            size_t off=0;
+            if(h[4]==AUDIO_PCM_V2 && n>=12) off=12;
+            else if(h[4]==AUDIO_PCM) off=0;
+            else continue;
+
+            size_t usable=p.size()-off;
+            if(!usable || !audio_dev || !audio_stream) continue;
+
+            if(SDL_AudioStreamPut(audio_stream,p.data()+off,(int)usable)!=0){
+                Log(std::string("SDL_AudioStreamPut failed: ")+SDL_GetError());
+                continue;
+            }
+
+            int available=SDL_AudioStreamAvailable(audio_stream);
+            if(available<0){
+                Log(std::string("SDL_AudioStreamAvailable failed: ")+SDL_GetError());
+                continue;
+            }
+
+            if(available>0){
+                std::vector<uint8_t> converted((size_t)available);
+                int got=SDL_AudioStreamGet(audio_stream,converted.data(),available);
+                if(got<0){
+                    Log(std::string("SDL_AudioStreamGet failed: ")+SDL_GetError());
+                    continue;
+                }
+                if(got>0){
+                    Uint32 queued=SDL_GetQueuedAudioSize(audio_dev);
+                    if(queued>AUDIO_MAX){
+                        SDL_ClearQueuedAudio(audio_dev);
+                        audio_playing=false;
+                        ++audio_underruns;
+                        queued=0;
+                    }
+
+                    if(SDL_QueueAudio(audio_dev,converted.data(),(Uint32)got)!=0){
+                        Log(std::string("SDL_QueueAudio failed: ")+SDL_GetError());
+                        continue;
+                    }
+
+                    ++audio_packets;
+                    queued=SDL_GetQueuedAudioSize(audio_dev);
+                    if(!audio_playing.load() && queued>=AUDIO_START_BYTES){
+                        SDL_PauseAudioDevice(audio_dev,0);
+                        audio_playing=true;
+                    }
+                }
             }
         }
 
         ResetAudioPlayback();
+        if(audio_stream){ SDL_FreeAudioStream(audio_stream); audio_stream=nullptr; }
         close(fd);
         Log("audio disconnected");
     }
@@ -740,6 +808,7 @@ int main(){
     if(client_fd>=0) shutdown(client_fd,SHUT_RDWR);
     video_cv.notify_all();
     net.join(); dec.join(); aud.join();
+    if(audio_stream){ SDL_FreeAudioStream(audio_stream); audio_stream=nullptr; }
     if(audio_dev) SDL_CloseAudioDevice(audio_dev);
     if(gl_yuv_textures[0]) glDeleteTextures(3,gl_yuv_textures);
     if(gl_yuv_program) glDeleteProgram(gl_yuv_program);
