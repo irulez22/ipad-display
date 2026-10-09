@@ -173,6 +173,9 @@ int wmain()
 
     uint64_t resampleAccumulator = 0;
     const uint64_t outputRate = 48000;
+    bool havePreviousSample = false;
+    float previousLeft = 0.0f;
+    float previousRight = 0.0f;
 
     for (;;) {
         UINT32 packetFrames = 0;
@@ -213,12 +216,26 @@ int wmain()
                     }
                 }
 
+                if (!havePreviousSample) {
+                    previousLeft = left;
+                    previousRight = right;
+                    havePreviousSample = true;
+                    continue;
+                }
+
                 resampleAccumulator += outputRate;
                 while (resampleAccumulator >= inputFmt.sampleRate) {
+                    const uint64_t overshoot = resampleAccumulator - inputFmt.sampleRate;
+                    const float fraction = 1.0f - (float)overshoot / (float)outputRate;
+                    const float outLeft = previousLeft + (left - previousLeft) * fraction;
+                    const float outRight = previousRight + (right - previousRight) * fraction;
+                    output.push_back(to_s16(outLeft));
+                    output.push_back(to_s16(outRight));
                     resampleAccumulator -= inputFmt.sampleRate;
-                    output.push_back(to_s16(left));
-                    output.push_back(to_s16(right));
                 }
+
+                previousLeft = left;
+                previousRight = right;
             }
 
             if (!output.empty()) {
