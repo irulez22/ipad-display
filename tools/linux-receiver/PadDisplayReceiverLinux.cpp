@@ -52,6 +52,9 @@ static bool fullscreen_=true;
 static int stream_w=1366, stream_h=768;
 static AVBufferRef* hw_device=nullptr;
 static AVPixelFormat hw_fmt=AV_PIX_FMT_NONE;
+static TTF_Font* status_font=nullptr;
+static std::mutex render_mtx;
+static void DrawStatus(const char* message);
 
 static void Log(const std::string& s) {
     std::lock_guard<std::mutex> lock(log_mtx);
@@ -315,9 +318,6 @@ static void SendKey(const SDL_KeyboardEvent& e,bool up){
     uint8_t p[6]={uint8_t(up?1:0),uint8_t(vk>>8),uint8_t(vk),uint8_t(sc>>8),uint8_t(sc),0};
     SendPacket(KEYBOARD_V1,p,sizeof(p));
 }
-
-static TTF_Font* status_font=nullptr;
-static std::mutex render_mtx;
 
 static void DrawStatus(const char* message){
     if(!renderer_) return;
