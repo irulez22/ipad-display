@@ -5,13 +5,32 @@ import struct
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import stream_windows as stream
 
 
 class StreamTests(unittest.TestCase):
+    def test_linux_encoder_avoids_constant_bitrate_padding(self):
+        for transport, expected in (("Linux", "vbr"), ("Windows", "cbr")):
+            with self.subTest(transport=transport), patch.object(
+                sys, "argv", ["stream", "localhost", "--transport", transport]
+            ), patch.object(stream.shutil, "which", return_value="ffmpeg"), patch.object(
+                stream.socket, "create_connection", return_value=MagicMock()
+            ), patch.object(stream, "send_packet"), patch.object(
+                stream, "find_touch_monitor", return_value=(0, 0, 1366, 768)
+            ), patch.object(stream.threading, "Thread"), patch.object(
+                stream.subprocess, "Popen", side_effect=OSError("test capture boundary")
+            ) as capture, patch("sys.stdout", io.StringIO()):
+                self.assertEqual(stream.main(), 1)
+                command = capture.call_args.args[0]
+                self.assertEqual(command[command.index("-rc") + 1], expected)
+                self.assertEqual(command[command.index("-maxrate") + 1], "6M")
+                self.assertEqual(command[command.index("-flush_packets") + 1], "1")
+                capture_filter = command[command.index("-filter_complex") + 1]
+                self.assertIn("draw_mouse=" + ("1" if transport == "Linux" else "0"), capture_filter)
+
     def test_input_abi_size(self):
         self.assertEqual(ctypes.sizeof(stream.INPUT), 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
         self.assertEqual(stream.INPUT.ki.offset, stream.INPUT.mi.offset)

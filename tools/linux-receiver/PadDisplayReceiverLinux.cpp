@@ -31,6 +31,7 @@ extern "C" {
 #include <deque>
 #include <fstream>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,8 +48,8 @@ static std::mutex video_mtx;
 static std::condition_variable video_cv;
 static std::deque<std::vector<uint8_t>> video_q;
 static constexpr size_t VIDEO_Q_MAX=8;
-static constexpr size_t AUDIO_MAX=48000*4*480/1000;
-static constexpr size_t AUDIO_START_BYTES=48000*4*240/1000;
+static constexpr size_t AUDIO_MAX=48000*4*240/1000;
+static constexpr size_t AUDIO_START_BYTES=48000*4*80/1000;
 static std::atomic<bool> audio_playing{false};
 static std::atomic<uint64_t> video_packets{0}, video_bytes{0}, decoded_frames{0}, frames{0};
 static std::atomic<uint64_t> frame_fingerprint{0};
@@ -268,10 +269,20 @@ struct Decoder {
     AVFrame *frame=nullptr,*sw=nullptr,*cached=nullptr;
     AVPacket* pkt=nullptr;
     SwsContext* sws=nullptr;
-    bool hw=false;
+    bool hw=false, software_requested=false;
+    unsigned readback_samples=0;
+    double readback_ms=0;
     std::vector<uint32_t> prev_samples;
 
-    bool Init(){
+    bool ReadbackTooSlow(double elapsed_ms, double fps){
+        if(readback_samples>=30) return false;
+        readback_ms+=elapsed_ms;
+        if(++readback_samples<30) return false;
+        if(!std::isfinite(fps) || fps<=0) fps=60;
+        return readback_ms/30 > 800.0/fps;
+    }
+
+    bool Init(bool allow_hw=true){
         const AVCodec* codec=avcodec_find_decoder(AV_CODEC_ID_H264);
         if(!codec) return false;
         ctx=avcodec_alloc_context3(codec);
@@ -279,8 +290,8 @@ struct Decoder {
         frame=av_frame_alloc(); sw=av_frame_alloc(); cached=av_frame_alloc(); pkt=av_packet_alloc();
         if(!ctx||!parser||!frame||!sw||!cached||!pkt) return false;
         const char* disable_vaapi=getenv("PADDISPLAY_DISABLE_VAAPI");
-        bool allow_hw=!(disable_vaapi && std::string(disable_vaapi)!="0");
-        if(!allow_hw) Log("decoder: VA-API disabled by PADDISPLAY_DISABLE_VAAPI");
+        allow_hw=allow_hw && !(disable_vaapi && std::string(disable_vaapi)!="0");
+        if(disable_vaapi && std::string(disable_vaapi)!="0") Log("decoder: VA-API disabled by PADDISPLAY_DISABLE_VAAPI");
         for(int i=0;allow_hw;++i){
             const AVCodecHWConfig* c=avcodec_get_hw_config(codec,i);
             if(!c) break;
@@ -319,11 +330,13 @@ struct Decoder {
         ++decoded_frames;
         AVFrame* use=src;
         if(src->format==hw_fmt){
+            auto readback_start=std::chrono::steady_clock::now();
             av_frame_unref(sw);
             if(av_hwframe_map(sw,src,AV_HWFRAME_MAP_READ|AV_HWFRAME_MAP_DIRECT)<0){
                 av_frame_unref(sw);
                 if(av_hwframe_transfer_data(sw,src,0)<0){
-                    Log("VA-API readback failed; use software decoding on this driver");
+                    Log("VA-API readback failed; switching to software decoding");
+                    software_requested=true;
                     return;
                 }
             } else {
@@ -344,6 +357,13 @@ struct Decoder {
                 use=cached;
             }
             if(use==src) use=sw;
+            double elapsed=std::chrono::duration<double,std::milli>(
+                std::chrono::steady_clock::now()-readback_start).count();
+            if(ReadbackTooSlow(elapsed,av_q2d(ctx->framerate))){
+                Log("decoder: VA-API readback averages "+std::to_string(readback_ms/30)+
+                    " ms; switching to software to preserve frame rate");
+                software_requested=true;
+            }
         }
 
         const int w=use->width, h=use->height;
@@ -426,14 +446,17 @@ struct Decoder {
             if(!out_n) continue;
             av_packet_unref(pkt); pkt->data=out; pkt->size=out_n;
             if(avcodec_send_packet(ctx,pkt)<0) continue;
-            while(avcodec_receive_frame(ctx,frame)==0){Present(frame);av_frame_unref(frame);}
+            while(avcodec_receive_frame(ctx,frame)==0){
+                Present(frame);av_frame_unref(frame);
+                if(software_requested) return;
+            }
         }
     }
 };
 
 static void DecodeThread(){
-    Decoder d;
-    if(!d.Init()){Log("decoder init failed");running=false;return;}
+    std::unique_ptr<Decoder> d(new Decoder);
+    if(!d->Init()){Log("decoder init failed");running=false;return;}
     while(running){
         std::vector<uint8_t> chunk;
         {
@@ -444,13 +467,19 @@ static void DecodeThread(){
         }
         video_cv.notify_all();
         if(chunk.empty()){
-            if(!d.Reset()){Log("decoder reset failed");running=false;video_cv.notify_all();return;}
+            if(!d->Reset()){Log("decoder reset failed");running=false;video_cv.notify_all();return;}
             continue;
         }
         const size_t bytes=chunk.size();
         // FFmpeg bitstream readers require zero padding beyond the input.
         chunk.resize(bytes+AV_INPUT_BUFFER_PADDING_SIZE,0);
-        d.Feed(chunk.data(),bytes);
+        d->Feed(chunk.data(),bytes);
+        if(d->software_requested){
+            d.reset(new Decoder);
+            av_buffer_unref(&hw_device);
+            if(!d->Init(false)){Log("software decoder init failed");running=false;video_cv.notify_all();return;}
+            // The next in-band SPS/PPS and IDR resume the new decoder.
+        }
     }
 }
 static void ResetAudioPlayback(){
@@ -892,6 +921,7 @@ static void DrawStatus(const char* message){
 }
 
 int main(){
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME,"PadDisplay");
     const char* home=getenv("HOME");
     std::string state=home?std::string(home)+"/.local/state/paddisplay":"/tmp/paddisplay";
     if(home){mkdir((std::string(home)+"/.local").c_str(),0755);mkdir((std::string(home)+"/.local/state").c_str(),0755);}
@@ -997,6 +1027,7 @@ int main(){
         bool now_connected=connected.load();
         if(now_connected!=last_connected){
             last_connected=now_connected;
+            SDL_ShowCursor(now_connected ? SDL_DISABLE : SDL_ENABLE);
             if(now_connected){
                 SDL_SetWindowTitle(window_,"PadDisplay - Connected");
             } else {

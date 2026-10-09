@@ -59,21 +59,24 @@ function Set-CloudbookDisplay($Adapter, [bool]$Enabled) {
   if ($Adapter.FriendlyName -ne "Virtual Display Driver" -or $Adapter.InstanceId -notlike 'ROOT\DISPLAY\*') {
     throw "Refusing to change a physical display adapter."
   }
-  $problem = (Get-PnpDeviceProperty -InstanceId $Adapter.InstanceId -KeyName "DEVPKEY_Device_ProblemCode" -ErrorAction Stop).Data
-  if (($Enabled -and $problem -eq 0) -or (-not $Enabled -and $problem -eq 22)) { return }
+  $hardwareId = @((Get-PnpDeviceProperty -InstanceId $Adapter.InstanceId -KeyName "DEVPKEY_Device_HardwareIds" -ErrorAction Stop).Data)[0]
+  if (-not $hardwareId) { throw "Virtual display hardware ID unavailable." }
   if ($Enabled) {
-    Enable-PnpDevice -InstanceId $Adapter.InstanceId -Confirm:$false -ErrorAction Stop
+    & $script:targetTool $hardwareId on $mode.W $mode.H $fps
   } else {
-    Disable-PnpDevice -InstanceId $Adapter.InstanceId -Confirm:$false -ErrorAction Stop
+    & $script:targetTool $hardwareId off
   }
+  if ($LASTEXITCODE -ne 0) { throw "Could not change Cloudbook desktop attachment." }
 }
 
-function Invoke-CloudbookDisplaySession($Adapter, [scriptblock]$Action) {
+function Invoke-CloudbookDisplaySession($Adapter, [scriptblock]$Action, $Address) {
   try {
     Set-CloudbookDisplay $Adapter $true
     & $Action
   } finally {
-    Set-CloudbookDisplay $Adapter $false
+    if ((Test-Path -LiteralPath $stopFile) -or -not (Test-TcpPort $Address 4822 500)) {
+      Set-CloudbookDisplay $Adapter $false
+    }
   }
 }
 
@@ -85,18 +88,26 @@ function Write-EngineState($State, $Message) {
 }
 
 function Start-CloudbookSessions {
+  Write-Host "Cloudbook: finding virtual display adapter."
   $adapter = Get-CloudbookAdapter
   $script:streamProc = $null
   $hardwareId = @((Get-PnpDeviceProperty -InstanceId $adapter.InstanceId -KeyName "DEVPKEY_Device_HardwareIds" -ErrorAction Stop).Data)[0]
   if (-not $hardwareId) { throw "Virtual display hardware ID unavailable." }
   try {
-    Set-CloudbookDisplay $adapter $false
-    $targetTool = Ensure-WindowsHelper (Join-Path $PSScriptRoot "display_target.cpp") "display_target.exe" @("user32.lib","dxgi.lib")
+    Write-Host "Cloudbook: preparing desktop display helper."
+    $script:targetTool = Ensure-WindowsHelper (Join-Path $PSScriptRoot "display_target.cpp") "display_target.exe" @("user32.lib","dxgi.lib")
+    $problem = (Get-PnpDeviceProperty -InstanceId $adapter.InstanceId -KeyName "DEVPKEY_Device_ProblemCode" -ErrorAction Stop).Data
+    if ($problem -eq 22) {
+      Enable-PnpDevice -InstanceId $adapter.InstanceId -Confirm:$false -ErrorAction Stop
+    } elseif ($problem -ne 0) {
+      throw "Virtual display driver is unavailable (problem $problem)."
+    }
     $audioHelper = Ensure-WasapiHelper
     Write-EngineState "waiting" "Waiting for Cloudbook; virtual display is off."
     while (-not (Test-Path -LiteralPath $stopFile)) {
       $targetAddress = Resolve-CloudbookReceiver $ReceiverHost
       if (-not $targetAddress -or -not (Test-TcpPort $targetAddress 4822 500)) {
+        Set-CloudbookDisplay $adapter $false
         Write-EngineState "waiting" "Waiting for Cloudbook; virtual display is off."
         Start-Sleep -Milliseconds 500
         continue
@@ -109,19 +120,11 @@ function Start-CloudbookSessions {
           do {
             if (Test-Path -LiteralPath $stopFile) { return }
             $target = @(& $targetTool $hardwareId)
-            if ($LASTEXITCODE -eq 0 -and $target.Count -eq 3) { break }
-            Start-Sleep -Milliseconds 250
-          } while ([DateTime]::UtcNow -lt $deadline)
-          if ($target.Count -ne 3) { throw "Virtual display did not enumerate." }
-          $device = [string]$target[0]
-          Set-DisplayMode $device $mode.W $mode.H $fps
-          do {
-            if (Test-Path -LiteralPath $stopFile) { return }
-            $target = @(& $targetTool $hardwareId)
             if ($LASTEXITCODE -eq 0 -and $target.Count -eq 3 -and [int]$target[1] -ge 0) { break }
             Start-Sleep -Milliseconds 250
           } while ([DateTime]::UtcNow -lt $deadline)
           if ($target.Count -ne 3 -or [int]$target[1] -lt 0) { throw "Virtual desktop did not attach to DXGI." }
+          $device = [string]$target[0]
           $physical = Get-PhysicalDisplayMode $device
           if (-not $physical) { throw "Virtual desktop coordinates unavailable." }
           $streamArguments = @(
@@ -134,7 +137,7 @@ function Start-CloudbookSessions {
             "--status-file",('"{0}"' -f $statusFile),"--transport","Linux",
             "--audio-loopback",('"{0}"' -f $audioHelper)
           )
-          $script:streamProc = Start-Process -FilePath $pythonExe -ArgumentList $streamArguments -WindowStyle Hidden -PassThru
+          $script:streamProc = Start-Process -FilePath $pythonExe -ArgumentList $streamArguments -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $audioBuildDir "stream.log") -RedirectStandardError (Join-Path $audioBuildDir "stream-error.log")
           try {
             while (-not $script:streamProc.HasExited -and -not (Test-Path -LiteralPath $stopFile)) {
               Start-Sleep -Milliseconds 250
@@ -145,16 +148,17 @@ function Start-CloudbookSessions {
             $script:streamProc.Dispose()
             $script:streamProc = $null
           }
-        }
-        Write-EngineState "waiting" "Cloudbook disconnected; virtual display is off."
+        } $targetAddress
+        Write-EngineState "waiting" "Reconnecting to Cloudbook."
       } catch {
+        Write-Host ("Cloudbook connection: " + $_.Exception.Message)
         Write-EngineState "waiting" ("Connection failed: " + $_.Exception.Message)
       }
       Start-Sleep -Milliseconds 500
     }
   } finally {
     Stop-StreamerTree $script:streamProc
-    Set-CloudbookDisplay $adapter $false
+    if ($script:targetTool) { Set-CloudbookDisplay $adapter $false }
     Write-EngineState "stopped" "Stopped; virtual display is off."
     Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
   }

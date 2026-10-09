@@ -17,12 +17,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m unittest discover -s tests -v
-      - name: Check binary PCM output
+      - name: Check native audio and display helpers
         if: runner.os == 'Windows'
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
-          python -m unittest discover -s tests -p test_wasapi_output.py -v
+          python -m unittest discover -s tests -p test_windows_helpers.py -v
       - name: Check display lifecycle
         if: runner.os == 'Windows'
         shell: pwsh

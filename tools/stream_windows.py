@@ -939,7 +939,8 @@ def main():
             ]
         capture += [
             "-filter_complex",
-            "ddagrab=output_idx=%d:framerate=%d:draw_mouse=0" % (args.display, args.fps),
+            "ddagrab=output_idx=%d:framerate=%d:draw_mouse=%d" %
+            (args.display, args.fps, int(args.transport == "Linux")),
         ]
         if args.encoder == "x264":
             capture[-1] += ",hwdownload,format=bgra,scale=%d:%d,format=yuv420p" % (width_i, height_i)
@@ -956,7 +957,7 @@ def main():
             "-framerate",
             str(args.fps),
             "-draw_mouse",
-            "0",
+            "1" if args.transport == "Linux" else "0",
             "-i",
             "desktop",
             "-vf",
@@ -978,7 +979,7 @@ def main():
             "yuv420p",
         ]) + [
             "-rc",
-            "cbr",
+            "vbr" if args.transport == "Linux" else "cbr",
             "-b:v",
             args.bitrate,
             "-maxrate",
@@ -1039,7 +1040,7 @@ def main():
         "warning",
         "-fflags",
         "nobuffer",
-    ] + capture + ["-an"] + encode + ["-f", "h264", "pipe:1"]
+    ] + capture + ["-an"] + encode + ["-f", "h264", "-flush_packets", "1", "pipe:1"]
 
     print("Connecting to %s:%d..." % (args.host, args.port))
     print(

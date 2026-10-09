@@ -34,10 +34,12 @@ so DHCP address changes need no settings update. Both machines must share a
 LAN that allows broadcasts. With multiple receivers, enter the desired Linux
 hostname; a fixed IP remains supported.
 
-The Windows host enables the installed Virtual Display Driver only while the
-Cloudbook is connected, selects its actual DXGI output, and disables it on
-disconnect or Stop. Your physical displays stay enabled. Leave the engine
-running to wait for the next connection.
+The Windows host keeps the Virtual Display Driver loaded and attaches only its
+desktop output while the Cloudbook is connected. Disconnect or Stop detaches
+that output, leaving your two physical displays active. Transient stream retries
+keep it attached while the receiver remains reachable. This avoids restarting
+the graphics driver on every session; Windows can still redraw briefly when
+the desktop layout changes. Leave the engine running to await connections.
 
 Architecture:
 
@@ -53,7 +55,11 @@ Ctrl+Shift+Q exits. Logs are written to `~/.local/state/paddisplay/receiver.log`
 The receiver prefers VA-API. Direct surface mapping and an optimized copy from
 GPU memory support older Intel i965 hardware, including the Cloudbook's Braswell
 GPU. Drivers without direct mapping use normal frame download. The launchers no
-longer force software decoding. For troubleshooting, you can still run:
+longer force software decoding. After sampling 30 hardware frames, the receiver
+automatically switches to software if readback consumes too much of the stream's
+frame-time budget. It also falls back if readback fails. This preserves the
+requested 60 fps on Braswell, where CPU decoding is faster than GPU readback.
+For troubleshooting, you can still run:
 
     PADDISPLAY_DISABLE_VAAPI=1 sh tools/linux-receiver/run.sh
 
@@ -79,8 +85,8 @@ reset, fragmented socket reads, and shutdown on an idle connection.
 
 Each new video connection resets the H.264 parser/decoder before processing new
 data. Audio defaults to 48 kHz stereo signed 16-bit PCM, supports the optional
-format handshake, and keeps queued audio bounded to 480 ms. After an underrun,
-it pauses to rebuild its 240 ms prebuffer.
+format handshake, and keeps queued audio bounded to 240 ms. After an underrun,
+it pauses to rebuild its 80 ms prebuffer.
 
 Keyboard letters, digits, common punctuation, navigation, modifiers, and keypad
 keys are mapped. Punctuation uses Windows OEM virtual keys, so matching keyboard
@@ -89,5 +95,26 @@ layouts on both machines are still important. F11 remains local.
 Measured end-to-end input latency and subjective speaker quality still require
 interactive testing.
 
-Cloudbook calibration on the tested Wi-Fi: 1366x768, 30 fps, 4M bitrate.
-The audio prebuffer favors stable playback over minimum audio latency.
+Cloudbook target on the tested Wi-Fi: 1366x768, 60 fps, maximum 8M bitrate.
+Linux NVENC uses variable bitrate and flushes each encoded packet immediately.
+The audio queue starts after 80 ms and is capped at 240 ms.
+
+
+## Quiet audio and Wi-Fi bursts
+
+Use the Cloudbook's mixer to adjust the PadDisplay playback stream separately
+from system volume. PipeWire allows software amplification above 100%; reduce
+it if loud passages distort. Windows loopback still reflects the source audio
+level, so unusually quiet source applications can also affect the stream.
+
+On the tested Intel Wi-Fi adapter, disabling power saving reduced bursts:
+
+    sudo iw dev wlan0 set power_save off
+
+This trades some battery life for streaming consistency. The Cloudbook has this
+command in /etc/rc.local; its original is /etc/rc.local.paddisplay.bak.
+
+
+Linux uses the captured Windows pointer while connected and hides its local SDL
+pointer, avoiding two cursors with different delays. The local pointer returns
+on disconnect. The audio stream uses the stable mixer name PadDisplay.

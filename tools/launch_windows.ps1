@@ -264,10 +264,10 @@ if (-not [string]::IsNullOrWhiteSpace($ReceiverHost)) {
   $fps = $Fps
   $bitrate = $Bitrate
   $pythonExe = (Get-Command python.exe -ErrorAction Stop).Source
+  Write-Host "Cloudbook: loading session controller."
   . (Join-Path $PSScriptRoot "cloudbook_session.ps1")
-  $cloudbookAdapter = Get-CloudbookAdapter
-  Set-CloudbookDisplay $cloudbookAdapter $false
-  [void](Ensure-VddMode $mode.W $mode.H $fps -DeferRestart)
+  Write-Host "Cloudbook: checking display mode."
+  [void](Ensure-VddMode $mode.W $mode.H $fps)
   Start-CloudbookSessions
   exit
 }

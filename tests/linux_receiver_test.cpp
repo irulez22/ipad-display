@@ -5,6 +5,16 @@
 #include <iterator>
 
 int main(){
+    Decoder fast,slow,thirty;
+    for(int i=0;i<29;++i){
+        assert(!fast.ReadbackTooSlow(2,60));
+        assert(!slow.ReadbackTooSlow(21,60));
+        assert(!thirty.ReadbackTooSlow(21,30));
+    }
+    assert(!fast.ReadbackTooSlow(2,60));
+    assert(slow.ReadbackTooSlow(21,60));
+    assert(!thirty.ReadbackTooSlow(21,30));
+    assert(!slow.ReadbackTooSlow(21,60));
     const std::string nonce(32,'a');
     auto reply=DiscoveryReply("PADDISPLAY_DISCOVER_V1 "+nonce);
     assert(reply.find("PADDISPLAY_RECEIVER_V1 "+nonce+" ")==0);

@@ -68,3 +68,38 @@ over SSH and the Windows desktop:
 The speaker output remained muted during digital recording. Physical speaker
 quality, input latency and long-duration Wi-Fi roaming have not been verified.
 The audio queue starts at 240 ms and is capped at 480 ms, favoring continuity.
+
+## 60 fps and desktop-only attachment (2026-10-10)
+
+The 30 fps calibration was replaced with the requested 60 fps target. Measured
+VA-API surface readback took about 23 ms per frame on Braswell, exceeding a
+60 fps frame budget. The receiver now samples readback cost and switches to
+software automatically when needed; no environment override is required.
+Observed software presentation reached approximately 59.9-60.2 fps in stable
+samples, with intermittent Wi-Fi dips still possible. Linux NVENC now uses
+variable bitrate capped at the configured value and immediately flushes video.
+
+The virtual driver stays enabled. The native helper stages and applies only
+the virtual desktop output's attachment. Hardware checks showed two physical
+displays with unchanged bounds after detaching, PnP problem code 0 throughout,
+and the third output restored on attachment. Transient stream retries retain
+the output while the receiver remains reachable. Windows may still redraw
+during topology changes; this does not promise completely flash-free switching.
+Adding a previously unsupported driver resolution still requires a driver reload.
+
+Native regression tests cover two-step configuration, no-op repeated attachment,
+primary-display protection and failure handling. PowerShell checks cover retry
+behavior. Wi-Fi power saving was disabled on the Cloudbook and a backed-up
+rc.local hook preserves that choice at startup; reboot behavior is unverified.
+
+The clean PC-to-Cloudbook TCP test measured approximately 9.8 Mbps with streaming
+paused. The final quality target is 8M variable bitrate at 60 fps, rather than
+the earlier 4M cap; uncompressed stereo audio additionally uses about 1.54 Mbps.
+A 12M ceiling was tested but exceeds that measured sustained link capacity.
+Linux now captures the Windows pointer and hides the local SDL cursor while
+connected, removing the duplicate pointer. The audio mixer name is PadDisplay.
+
+Latest audio adjustment: reduced startup prebuffer from 240 ms to 80 ms and
+maximum queue from 480 ms to 240 ms. PadDisplay's own PipeWire stream was set to
+200%, preserving the user's master volume. The native build succeeded; a long
+soak test and subjective audio-delay/volume confirmation remain outstanding.

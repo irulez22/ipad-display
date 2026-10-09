@@ -4,21 +4,30 @@ $ErrorActionPreference = "Stop"
 $virtual = [pscustomobject]@{ FriendlyName="Virtual Display Driver"; InstanceId='ROOT\DISPLAY\0000' }
 $physical = [pscustomobject]@{ FriendlyName="NVIDIA GeForce RTX"; InstanceId='PCI\GPU' }
 $script:devices = @($physical,$virtual)
+$stopFile=Join-Path ([IO.Path]::GetTempPath()) "paddisplay-test-stop-not-present"
+function Test-TcpPort { return $false }
 $script:changes = @()
 function Get-PnpDevice { param($Class,[switch]$PresentOnly,$ErrorAction) return $script:devices }
-function Get-PnpDeviceProperty { param($InstanceId,$KeyName,$ErrorAction) return [pscustomobject]@{ Data=-1 } }
-function Enable-PnpDevice { param($InstanceId,$Confirm,$ErrorAction) $script:changes += "on:$InstanceId" }
-function Disable-PnpDevice { param($InstanceId,$Confirm,$ErrorAction) $script:changes += "off:$InstanceId" }
+function Get-PnpDeviceProperty { param($InstanceId,$KeyName,$ErrorAction) return [pscustomobject]@{ Data="Root\MttVDD" } }
+function Enable-PnpDevice { throw "Session must not restart the adapter" }
+function Disable-PnpDevice { throw "Session must not restart the adapter" }
+$mode=@{W=1366;H=768}
+$fps=60
+$script:targetTool="Invoke-TestTarget"
+function Invoke-TestTarget {
+  $script:changes += "$($args[1]):$($args[0])"
+  $global:LASTEXITCODE=0
+}
 function Assert($Condition,$Message) { if(-not $Condition) { throw $Message } }
 
 Assert ((Get-CloudbookAdapter).InstanceId -eq $virtual.InstanceId) "Wrong adapter selected"
 Invoke-CloudbookDisplaySession $virtual { $script:changes += "stream" }
-Assert (($script:changes -join ",") -eq 'on:ROOT\DISPLAY\0000,stream,off:ROOT\DISPLAY\0000') "Incorrect normal lifecycle"
+Assert (($script:changes -join ",") -eq 'on:Root\MttVDD,stream,off:Root\MttVDD') "Incorrect normal lifecycle"
 $script:changes = @()
 try { Invoke-CloudbookDisplaySession $virtual { throw "capture failed" } } catch {
   Assert ($_.Exception.Message -eq "capture failed") "Unexpected failure"
 }
-Assert (($script:changes -join ",") -eq 'on:ROOT\DISPLAY\0000,off:ROOT\DISPLAY\0000') "Failure left display enabled"
+Assert (($script:changes -join ",") -eq 'on:Root\MttVDD,off:Root\MttVDD') "Failure left display enabled"
 $script:changes = @()
 $rejected = $false
 try { Set-CloudbookDisplay $physical $false } catch { $rejected = $true }
@@ -40,3 +49,9 @@ Assert ($reply.Address -eq "192.0.2.20" -and $reply.Name -eq "cloudbook") "Disco
 Assert ($null -eq (ConvertFrom-CloudbookAnnouncement "PADDISPLAY_RECEIVER_V1 wrong cloudbook 4822 4824" $nonce "192.0.2.20")) "Unsolicited discovery accepted"
 Assert ($null -eq (ConvertFrom-CloudbookAnnouncement "PADDISPLAY_RECEIVER_V1 $nonce cloudbook 22 4824" $nonce "192.0.2.20")) "Invalid service port accepted"
 Write-Host "Discovery reply checks passed."
+
+$script:changes=@()
+function Test-TcpPort { return $true }
+Invoke-CloudbookDisplaySession $virtual { $script:changes += "retry" } "192.0.2.20"
+Assert (($script:changes -join ",") -eq 'on:Root\MttVDD,retry') "Transient retry changed desktop topology"
+Write-Host "Reachable receiver keeps its display attached during retry."
