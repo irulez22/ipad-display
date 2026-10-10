@@ -55,6 +55,30 @@ function Get-CloudbookAdapter {
   return $devices[0]
 }
 
+function Set-CloudbookAdapterEnabled($Adapter, [bool]$Enabled) {
+  if ($Adapter.FriendlyName -ne "Virtual Display Driver" -or $Adapter.InstanceId -notlike 'ROOT\DISPLAY\*') {
+    throw "Refusing to change a physical display adapter."
+  }
+
+  $problem = (Get-PnpDeviceProperty -InstanceId $Adapter.InstanceId -KeyName "DEVPKEY_Device_ProblemCode" -ErrorAction Stop).Data
+
+  if ($Enabled) {
+    if ($problem -eq 22) {
+      Enable-PnpDevice -InstanceId $Adapter.InstanceId -Confirm:$false -ErrorAction Stop
+      Start-Sleep -Milliseconds 750
+    } elseif ($problem -ne 0) {
+      throw "Virtual display driver is unavailable (problem $problem)."
+    }
+  } else {
+    if ($problem -eq 0) {
+      Disable-PnpDevice -InstanceId $Adapter.InstanceId -Confirm:$false -ErrorAction Stop
+      Start-Sleep -Milliseconds 500
+    } elseif ($problem -ne 22) {
+      throw "Virtual display driver could not be disabled cleanly (problem $problem)."
+    }
+  }
+}
+
 function Set-CloudbookDisplay($Adapter, [bool]$Enabled) {
   if ($Adapter.FriendlyName -ne "Virtual Display Driver" -or $Adapter.InstanceId -notlike 'ROOT\DISPLAY\*') {
     throw "Refusing to change a physical display adapter."
@@ -97,22 +121,22 @@ function Start-CloudbookSessions {
     Write-Host "Cloudbook: preparing desktop display helper."
     $script:targetTool = Ensure-WindowsHelper (Join-Path $PSScriptRoot "display_target.cpp") "display_target.exe" @("user32.lib","dxgi.lib")
     $problem = (Get-PnpDeviceProperty -InstanceId $adapter.InstanceId -KeyName "DEVPKEY_Device_ProblemCode" -ErrorAction Stop).Data
-    if ($problem -eq 22) {
-      Enable-PnpDevice -InstanceId $adapter.InstanceId -Confirm:$false -ErrorAction Stop
-    } elseif ($problem -ne 0) {
+    if ($problem -ne 0 -and $problem -ne 22) {
       throw "Virtual display driver is unavailable (problem $problem)."
     }
     $audioHelper = Ensure-WasapiHelper
-    Write-EngineState "waiting" "Waiting for Cloudbook; virtual display is off."
+    Set-CloudbookAdapterEnabled $adapter $false
+    Write-EngineState "waiting" "Waiting for Cloudbook; virtual display adapter is off."
     while (-not (Test-Path -LiteralPath $stopFile)) {
       $targetAddress = Resolve-CloudbookReceiver $ReceiverHost
       if (-not $targetAddress -or -not (Test-TcpPort $targetAddress 4822 500)) {
-        Set-CloudbookDisplay $adapter $false
-        Write-EngineState "waiting" "Waiting for Cloudbook; virtual display is off."
+        Set-CloudbookAdapterEnabled $adapter $false
+        Write-EngineState "waiting" "Waiting for Cloudbook; virtual display adapter is off."
         Start-Sleep -Milliseconds 500
         continue
       }
       try {
+        Set-CloudbookAdapterEnabled $adapter $true
         Invoke-CloudbookDisplaySession $adapter {
           Write-EngineState "connecting" "Cloudbook found; enabling its virtual display."
           $deadline = [DateTime]::UtcNow.AddSeconds(15)
@@ -149,17 +173,22 @@ function Start-CloudbookSessions {
             $script:streamProc = $null
           }
         } $targetAddress
-        Write-EngineState "waiting" "Reconnecting to Cloudbook."
+        Set-CloudbookAdapterEnabled $adapter $false
+        Write-EngineState "waiting" "Reconnecting to Cloudbook; virtual display adapter is off."
       } catch {
+        try { Set-CloudbookAdapterEnabled $adapter $false } catch {}
         Write-Host ("Cloudbook connection: " + $_.Exception.Message)
-        Write-EngineState "waiting" ("Connection failed: " + $_.Exception.Message)
+        Write-EngineState "waiting" ("Connection failed; virtual display adapter is off: " + $_.Exception.Message)
       }
       Start-Sleep -Milliseconds 500
     }
   } finally {
     Stop-StreamerTree $script:streamProc
-    if ($script:targetTool) { Set-CloudbookDisplay $adapter $false }
-    Write-EngineState "stopped" "Stopped; virtual display is off."
+    if ($script:targetTool) {
+      try { Set-CloudbookDisplay $adapter $false } catch {}
+    }
+    try { Set-CloudbookAdapterEnabled $adapter $false } catch {}
+    Write-EngineState "stopped" "Stopped; virtual display adapter is off."
     Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
   }
 }
